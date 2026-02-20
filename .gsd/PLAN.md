@@ -1,394 +1,407 @@
 ---
-phase: 2
+phase: 3
 plan: 1
 wave: 1
 gap_closure: false
 ---
 
-# Plan 2.1: InMemoryJobRepository
+# Plan 3.1: Hashing Utility & Request Schemas
 
 ## Objective
 
-Build the thread-safe, in-memory persistence layer. This is the only component allowed to own `Job` storage. It enforces the state machine strictly — no caller can bypass `validate_transition()`. No HTTP, no FastAPI, no I/O.
+Implement the deterministic SHA-256 hashing utility and the `StartJobRequest` Pydantic schema. Pure Python — no FastAPI, no I/O. These are the building blocks for the router in Plan 3.2.
 
 ## Context
 
 Load these files for context:
-- `.gsd/SPEC.md`
-- `.gsd/CONTEXT.md` → Sections: "Architecture", "Job Lifecycle — State Machine"
-- `app/domain/models.py` — Job, JobStatus, LEGAL_TRANSITIONS, validate_transition
-- `app/domain/exceptions.py` — JobNotFoundError, InvalidStateTransitionError
+- `.gsd/CONTEXT.md` → Sections: "Hashing Contract"
+- `.gsd/PHASE_3.md` → `app/utils/hashing.py`, `app/schemas/requests.py`
 
 ## Tasks
 
 <task type="auto">
-  <name>Create app/repository/__init__.py (empty)</name>
-  <files>app/repository/__init__.py</files>
+  <name>Create app/utils/__init__.py and app/utils/hashing.py</name>
+  <files>app/utils/__init__.py, app/utils/hashing.py</files>
   <action>
-    Create `app/repository/__init__.py` as a completely empty file.
-    No content, no imports, no comments.
+    1. Create `app/utils/__init__.py` as a completely empty file.
+
+    2. Create `app/utils/hashing.py` with exactly this:
+
+    ```python
+    import hashlib
+    import json
+
+
+    def hash_inputs(payload: dict) -> str:
+        """
+        Deterministic SHA-256 of a dict.
+        sort_keys=True ensures field order independence.
+        separators=(',', ':') eliminates whitespace variation.
+        """
+        canonical = json.dumps(payload, sort_keys=True, separators=(',', ':'))
+        return hashlib.sha256(canonical.encode('utf-8')).hexdigest()
+    ```
+
+    AVOID:
+    - Only `hashlib` and `json` — both are stdlib. Zero external deps.
+    - Must be `sha256` — not md5, sha1, or any other algorithm.
+    - Must use `sort_keys=True` AND `separators=(',', ':')` — both required for determinism.
+    - Encoding MUST be `'utf-8'`.
+    - No caching, memoization, or side effects.
   </action>
-  <verify>python -c "import app.repository; print('OK')"</verify>
+  <verify>python -c "from app.utils.hashing import hash_inputs; h=hash_inputs({'b':2,'a':1}); assert h==hash_inputs({'a':1,'b':2}); assert len(h)==64; print('hashing OK', h[:16])"</verify>
   <done>
-    - `app/repository/__init__.py` exists and is empty.
-    - `import app.repository` exits 0.
+    - `app/utils/__init__.py` exists (empty).
+    - `hash_inputs({'b':2,'a':1}) == hash_inputs({'a':1,'b':2})` — order independent.
+    - `len(hash_inputs({})) == 64`.
   </done>
 </task>
 
 <task type="auto">
-  <name>Create app/repository/job_repo.py</name>
-  <files>app/repository/job_repo.py</files>
+  <name>Create app/schemas/__init__.py and app/schemas/requests.py</name>
+  <files>app/schemas/__init__.py, app/schemas/requests.py</files>
   <action>
-    Create `app/repository/job_repo.py` with the following implementation exactly:
+    1. Create `app/schemas/__init__.py` as a completely empty file.
 
-    **Imports (ONLY these):**
+    2. Create `app/schemas/requests.py` with exactly this:
+
     ```python
-    import threading
-    import uuid
-    from datetime import datetime, timezone
-    from typing import Optional
+    from typing import Any
 
-    from app.domain.models import Job, JobStatus, validate_transition
-    from app.domain.exceptions import JobNotFoundError
-    ```
+    from pydantic import BaseModel, ConfigDict
 
-    **Class:**
-    ```python
-    class InMemoryJobRepository:
-        def __init__(self):
-            self._store: dict[str, Job] = {}
-            self._lock = threading.Lock()
 
-        def create(self, input_hash: str) -> Job:
-            job_id = str(uuid.uuid4())
-            now = datetime.now(timezone.utc)
-            job = Job(
-                job_id=job_id,
-                status=JobStatus.AWAITING_PAYMENT,
-                input_hash=input_hash,
-                blockchain_identifier="mock_bc_" + job_id[:8],
-                created_at=now,
-                updated_at=now,
-            )
-            with self._lock:
-                self._store[job_id] = job
-            return job
+    class StartJobRequest(BaseModel):
+        model_config = ConfigDict(extra='forbid')
 
-        def get(self, job_id: str) -> Job:
-            with self._lock:
-                job = self._store.get(job_id)
-            if job is None:
-                raise JobNotFoundError(job_id)
-            return job
-
-        def update_status(
-            self,
-            job_id: str,
-            target: JobStatus,
-            result: Optional[str] = None,
-            error: Optional[str] = None,
-        ) -> Job:
-            with self._lock:
-                job = self._store.get(job_id)
-                if job is None:
-                    raise JobNotFoundError(job_id)
-                validate_transition(job.status, target)
-                updated = job.model_copy(update={
-                    "status": target,
-                    "updated_at": datetime.now(timezone.utc),
-                    "result": result,
-                    "error": error,
-                })
-                self._store[job_id] = updated
-            return updated
-
-        def count(self) -> int:
-            with self._lock:
-                return len(self._store)
+        inputs: dict[str, Any]
     ```
 
     AVOID:
-    - Do NOT mutate `job` directly — `Job` is frozen. Always use `model_copy(update={...})`.
-    - Do NOT release `_lock` between the `get` and `update` inside `update_status` — the entire read-validate-write sequence MUST be atomic under the same lock acquisition.
-    - Do NOT import `fastapi`, `httpx`, or any HTTP module.
-    - Do NOT call `validate_transition()` outside of `_lock` in `update_status`.
-    - `datetime.now(timezone.utc)` — always use timezone-aware datetimes (NOT `datetime.utcnow()`).
+    - `extra='forbid'` — never 'allow' or 'ignore'. Extra fields must cause 422.
+    - No other fields, validators, or methods.
+    - No `fastapi` imports here — pure Pydantic only.
   </action>
-  <verify>python -c "from app.repository.job_repo import InMemoryJobRepository; r = InMemoryJobRepository(); j = r.create('a'*64); print('repo OK', j.status)"</verify>
+  <verify>python -c "from app.schemas.requests import StartJobRequest; r=StartJobRequest(inputs={'task':'x'}); print('schema OK', r.inputs)"</verify>
   <done>
-    - `app/repository/job_repo.py` imports cleanly.
-    - `InMemoryJobRepository().create('a'*64)` returns a `Job` with `status == JobStatus.AWAITING_PAYMENT`.
-    - `InMemoryJobRepository().get('nonexistent')` raises `JobNotFoundError`.
-    - No imports from `fastapi`, `httpx`, or any I/O module.
+    - `StartJobRequest(inputs={'task':'x'})` succeeds.
+    - `StartJobRequest(inputs={}, EXTRA='bad')` raises `ValidationError`.
+    - `StartJobRequest.model_json_schema()` has `"type": "object"` and `"properties"`.
   </done>
 </task>
 
 ## Must-Haves
 
-- [ ] `app/repository/__init__.py` exists (empty)
-- [ ] `app/repository/job_repo.py` — `InMemoryJobRepository` with `create`, `get`, `update_status`, `count`
-- [ ] `_lock` wraps every `_store` access (reads AND writes)
-- [ ] `Job` is never mutated — always `model_copy(update={...})`
-- [ ] `update_status` is fully atomic (get + validate + write under single lock)
+- [ ] `app/utils/hashing.py` — stdlib only, `sort_keys=True`, `separators=(',',':')`
+- [ ] `app/schemas/requests.py` — `extra='forbid'`, single `inputs: dict[str, Any]` field
 
 ## Success Criteria
 
-- [ ] `python -c "from app.repository.job_repo import InMemoryJobRepository"` exits 0
-- [ ] All tasks verified passing
+- [ ] `hash_inputs({'b':2,'a':1}) == hash_inputs({'a':1,'b':2})` ✓
+- [ ] `len(hash_inputs({})) == 64` ✓
+- [ ] `StartJobRequest(inputs={}, EXTRA='x')` raises `ValidationError` ✓
 
 ---
 ---
-phase: 2
+phase: 3
 plan: 2
 wave: 1
 gap_closure: false
 ---
 
-# Plan 2.2: Service Layer
+# Plan 3.2: Job Router & FastAPI App Factory
 
 ## Objective
 
-Create the thin service wrapper layer — pure functions that delegate to the repository. Nothing stateful here. No HTTP. This layer is the calling convention used by routers in Phase 3+.
+Wire up the FastAPI application with three endpoints (`/availability`, `/input_schema`, `/start_job`) and the `create_app()` factory. Repo is attached to `app.state` and injected via `Depends(get_repo)`.
 
 ## Context
 
 Load these files for context:
-- `.gsd/SPEC.md`
-- `app/domain/models.py`
-- `app/repository/job_repo.py`
+- `.gsd/CONTEXT.md` → Sections: "Endpoints Contract"
+- `.gsd/PHASE_3.md` → `app/routers/jobs.py`, `app/main.py`
+- `app/utils/hashing.py`, `app/schemas/requests.py` (Plan 3.1)
+- `app/services/job_service.py`, `app/repository/job_repo.py` (Phase 2)
 
 ## Tasks
 
 <task type="auto">
-  <name>Create app/services/__init__.py (empty)</name>
-  <files>app/services/__init__.py</files>
+  <name>Create app/routers/__init__.py and app/routers/jobs.py</name>
+  <files>app/routers/__init__.py, app/routers/jobs.py</files>
   <action>
-    Create `app/services/__init__.py` as a completely empty file.
-    No content, no imports, no comments.
+    1. Create `app/routers/__init__.py` as a completely empty file.
+
+    2. Create `app/routers/jobs.py` with exactly this:
+
+    ```python
+    from fastapi import APIRouter, Depends, Request
+
+    from app.domain.models import Job
+    from app.repository.job_repo import InMemoryJobRepository
+    from app.schemas.requests import StartJobRequest
+    from app.services import job_service
+    from app.utils.hashing import hash_inputs
+
+    router = APIRouter()
+
+
+    def get_repo(request: Request) -> InMemoryJobRepository:
+        return request.app.state.repo
+
+
+    @router.get("/availability")
+    def availability(repo: InMemoryJobRepository = Depends(get_repo)):
+        return {"available": True, "queue_depth": repo.count()}
+
+
+    @router.get("/input_schema")
+    def input_schema():
+        return StartJobRequest.model_json_schema()
+
+
+    @router.post("/start_job", status_code=201)
+    def start_job(
+        body: StartJobRequest,
+        repo: InMemoryJobRepository = Depends(get_repo),
+    ) -> Job:
+        input_hash = hash_inputs(body.inputs)
+        job = job_service.create_job(repo, input_hash)
+        return job
+    ```
+
+    AVOID:
+    - Do NOT instantiate `InMemoryJobRepository()` inside any route handler.
+    - Do NOT use `async def` for handlers — keep sync.
+    - `/start_job` MUST have `status_code=201`.
+    - Return `Job` object directly — FastAPI serializes it. Do NOT call `.model_dump()`.
   </action>
-  <verify>python -c "import app.services; print('OK')"</verify>
+  <verify>python -c "from app.routers.jobs import router; print('router OK', [r.path for r in router.routes])"</verify>
   <done>
-    - `app/services/__init__.py` exists and is empty.
+    - `router.routes` has 3 entries: `/availability`, `/input_schema`, `/start_job`.
+    - `get_repo` reads from `request.app.state.repo`.
   </done>
 </task>
 
 <task type="auto">
-  <name>Create app/services/job_service.py</name>
-  <files>app/services/job_service.py</files>
+  <name>Create app/main.py</name>
+  <files>app/main.py</files>
   <action>
-    Create `app/services/job_service.py` with exactly these two pure functions:
+    Create `app/main.py` with exactly this:
 
-    **Imports (ONLY these):**
     ```python
-    from typing import Optional
+    from fastapi import FastAPI
 
-    from app.domain.models import Job, JobStatus
     from app.repository.job_repo import InMemoryJobRepository
-    ```
-
-    **Functions:**
-    ```python
-    def create_job(repo: InMemoryJobRepository, input_hash: str) -> Job:
-        return repo.create(input_hash)
+    from app.routers import jobs
 
 
-    def advance_job_state(
-        repo: InMemoryJobRepository,
-        job_id: str,
-        target: JobStatus,
-        result: Optional[str] = None,
-        error: Optional[str] = None,
-    ) -> Job:
-        return repo.update_status(job_id, target, result=result, error=error)
+    def create_app() -> FastAPI:
+        app = FastAPI(title="Masumi MIP-003 Gateway", version="1.0.0")
+        repo = InMemoryJobRepository()
+        app.state.repo = repo
+        app.include_router(jobs.router)
+        return app
+
+
+    app = create_app()
     ```
 
     AVOID:
-    - Do NOT add any business logic here — pure pass-throughs to the repo.
-    - Do NOT import `fastapi`, `httpx`, or any HTTP module.
-    - Do NOT use `str | None` union syntax — use `Optional[str]`.
+    - `create_app()` must be the exact function name — tests call it directly.
+    - Module-level `app = create_app()` is REQUIRED for uvicorn.
+    - No middleware, CORS, or lifespan handlers in this phase.
+    - Each `create_app()` call MUST return a fresh app with a fresh repo — test isolation depends on this.
   </action>
-  <verify>python -c "from app.services.job_service import create_job, advance_job_state; print('service OK')"</verify>
+  <verify>python -c "from app.main import create_app; app=create_app(); print('app OK, routes:', [r.path for r in app.routes])"</verify>
   <done>
-    - `app/services/job_service.py` imports cleanly.
-    - `create_job` and `advance_job_state` are importable.
+    - `create_app()` returns FastAPI with 3 routes.
+    - `create_app().state.repo` is `InMemoryJobRepository`.
+    - Module-level `app` exists and is importable.
   </done>
 </task>
 
 ## Must-Haves
 
-- [ ] `app/services/__init__.py` exists (empty)
-- [ ] `app/services/job_service.py` — `create_job`, `advance_job_state` (pure functions, no state)
-- [ ] No business logic — delegates 100% to repo
+- [ ] `app/routers/jobs.py` — 3 endpoints, `get_repo` dependency, no repo in handlers
+- [ ] `app/main.py` — `create_app()` factory, `app.state.repo` set, module-level `app`
+- [ ] `/start_job` returns HTTP 201
 
 ## Success Criteria
 
-- [ ] `python -c "from app.services.job_service import create_job, advance_job_state"` exits 0
-- [ ] All tasks verified passing
+- [ ] `from app.main import create_app; create_app()` exits 0
+- [ ] Routes: `/availability` (GET), `/input_schema` (GET), `/start_job` (POST 201)
 
 ---
 ---
-phase: 2
+phase: 3
 plan: 3
 wave: 2
 gap_closure: false
 ---
 
-# Plan 2.3: Phase 2 Test Suite
+# Plan 3.3: Phase 3 Test Suite
 
 ## Objective
 
-Write and pass the complete Pytest verification suite for Phase 2. All 8 test cases must pass, including the thread-safety concurrent test. Runs AFTER Plans 2.1 and 2.2 are complete.
+Write and pass the complete Pytest verification suite for Phase 3. All 8 test cases must pass using `httpx.AsyncClient` with `ASGITransport`. Runs AFTER Plans 3.1 and 3.2 complete.
 
 ## Context
 
 Load these files for context:
-- `.gsd/PHASE_2.md` → "Verification Criteria" section
-- `app/repository/job_repo.py`
-- `app/services/job_service.py`
+- `.gsd/PHASE_3.md` → "Verification Criteria" section
+- `app/main.py`, `app/utils/hashing.py`
 
 ## Tasks
 
 <task type="auto">
-  <name>Create tests/test_phase2_repository.py</name>
-  <files>tests/test_phase2_repository.py</files>
+  <name>Create tests/test_phase3_endpoints.py</name>
+  <files>tests/test_phase3_endpoints.py</files>
   <action>
-    Create `tests/test_phase2_repository.py` with ALL 8 test cases below exactly as specified:
+    Create `tests/test_phase3_endpoints.py` with ALL 8 test cases exactly as specified:
 
     ```python
-    import threading
+    import hashlib
     import pytest
+    import httpx
 
-    from app.domain.models import JobStatus
-    from app.domain.exceptions import JobNotFoundError, InvalidStateTransitionError
-    from app.repository.job_repo import InMemoryJobRepository
-
-
-    # TC-2.1: create() returns a job in AWAITING_PAYMENT state
-    def test_create_job_initial_state():
-        repo = InMemoryJobRepository()
-        job = repo.create(input_hash="a" * 64)
-        assert job.status == JobStatus.AWAITING_PAYMENT
-        assert job.input_hash == "a" * 64
-        assert job.blockchain_identifier.startswith("mock_bc_")
-        assert job.result is None
-        assert job.error is None
+    from app.main import create_app
 
 
-    # TC-2.2: get() returns the same job that was created
-    def test_get_returns_created_job():
-        repo = InMemoryJobRepository()
-        job = repo.create(input_hash="b" * 64)
-        retrieved = repo.get(job.job_id)
-        assert retrieved.job_id == job.job_id
-
-
-    # TC-2.3: get() raises JobNotFoundError for unknown ID
-    def test_get_unknown_job_raises():
-        repo = InMemoryJobRepository()
-        with pytest.raises(JobNotFoundError):
-            repo.get("nonexistent-id")
-
-
-    # TC-2.4: Legal state transition updates status and updated_at
-    def test_legal_transition_updates_job():
-        repo = InMemoryJobRepository()
-        job = repo.create(input_hash="c" * 64)
-        updated = repo.update_status(job.job_id, JobStatus.RUNNING)
-        assert updated.status == JobStatus.RUNNING
-        assert updated.updated_at >= job.updated_at
-
-
-    # TC-2.5: Illegal state transition raises InvalidStateTransitionError
-    def test_illegal_transition_raises():
-        repo = InMemoryJobRepository()
-        job = repo.create(input_hash="d" * 64)
-        with pytest.raises(InvalidStateTransitionError):
-            repo.update_status(job.job_id, JobStatus.COMPLETED)  # skip RUNNING
-
-
-    # TC-2.6: count() reflects stored jobs
-    def test_count_reflects_stored_jobs():
-        repo = InMemoryJobRepository()
-        assert repo.count() == 0
-        repo.create("e" * 64)
-        repo.create("f" * 64)
-        assert repo.count() == 2
-
-
-    # TC-2.7: Thread-safety — concurrent creates produce unique IDs
-    def test_concurrent_creates_are_unique():
-        repo = InMemoryJobRepository()
-        ids = []
-        lock = threading.Lock()
-
-        def worker():
-            job = repo.create("g" * 64)
-            with lock:
-                ids.append(job.job_id)
-
-        threads = [threading.Thread(target=worker) for _ in range(100)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-
-        assert len(ids) == 100
-        assert len(set(ids)) == 100  # all unique
-
-
-    # TC-2.8: completed job with result is stored correctly
-    def test_completed_job_stores_result():
-        repo = InMemoryJobRepository()
-        job = repo.create("h" * 64)
-        repo.update_status(job.job_id, JobStatus.RUNNING)
-        done = repo.update_status(
-            job.job_id, JobStatus.COMPLETED, result="output_data"
+    @pytest.fixture
+    def client():
+        app = create_app()
+        return httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
         )
-        assert done.status == JobStatus.COMPLETED
-        assert done.result == "output_data"
-        assert done.error is None
+
+
+    # TC-3.1: hash_inputs is deterministic (field-order independent)
+    def test_hash_inputs_deterministic():
+        from app.utils.hashing import hash_inputs
+        h1 = hash_inputs({"b": 2, "a": 1})
+        h2 = hash_inputs({"a": 1, "b": 2})
+        assert h1 == h2
+        assert len(h1) == 64  # SHA-256 hex = 64 chars
+
+
+    # TC-3.2: hash_inputs produces correct SHA-256
+    def test_hash_inputs_correctness():
+        from app.utils.hashing import hash_inputs
+        payload = {"task": "hello"}
+        expected_canonical = '{"task":"hello"}'
+        expected_hash = hashlib.sha256(expected_canonical.encode()).hexdigest()
+        assert hash_inputs(payload) == expected_hash
+
+
+    # TC-3.3: GET /availability returns 200 with correct shape
+    @pytest.mark.asyncio
+    async def test_availability(client):
+        async with client as c:
+            r = await c.get("/availability")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["available"] is True
+        assert isinstance(data["queue_depth"], int)
+
+
+    # TC-3.4: GET /input_schema returns 200 with a JSON Schema object
+    @pytest.mark.asyncio
+    async def test_input_schema(client):
+        async with client as c:
+            r = await c.get("/input_schema")
+        assert r.status_code == 200
+        schema = r.json()
+        assert schema["type"] == "object"
+        assert "properties" in schema
+
+
+    # TC-3.5: POST /start_job creates a job and returns 201
+    @pytest.mark.asyncio
+    async def test_start_job_creates_job(client):
+        async with client as c:
+            r = await c.post("/start_job", json={"inputs": {"task": "do_work"}})
+        assert r.status_code == 201
+        job = r.json()
+        assert job["status"] == "awaiting_payment"
+        assert len(job["input_hash"]) == 64
+        assert job["blockchain_identifier"].startswith("mock_bc_")
+
+
+    # TC-3.6: POST /start_job with extra top-level fields returns 422
+    @pytest.mark.asyncio
+    async def test_start_job_rejects_extra_fields(client):
+        async with client as c:
+            r = await c.post(
+                "/start_job",
+                json={"inputs": {"task": "x"}, "hacker_field": "evil"},
+            )
+        assert r.status_code == 422
+
+
+    # TC-3.7: POST /start_job is deterministic — same inputs produce same hash
+    @pytest.mark.asyncio
+    async def test_start_job_hash_determinism(client):
+        payload = {"inputs": {"b": 2, "a": 1}}
+        async with client as c:
+            r1 = await c.post("/start_job", json=payload)
+            r2 = await c.post("/start_job", json=payload)
+        assert r1.json()["input_hash"] == r2.json()["input_hash"]
+
+
+    # TC-3.8: queue_depth increases after job creation
+    @pytest.mark.asyncio
+    async def test_queue_depth_increases(client):
+        async with client as c:
+            before = (await c.get("/availability")).json()["queue_depth"]
+            await c.post("/start_job", json={"inputs": {"task": "x"}})
+            after = (await c.get("/availability")).json()["queue_depth"]
+        assert after == before + 1
     ```
 
+    KEY: TC-3.7 and TC-3.8 share state across requests — they go inside ONE `async with client as c:` block.
+
     AVOID:
-    - Each test creates its own fresh `InMemoryJobRepository()` — no shared state.
-    - TC-2.7 MUST spawn exactly 100 threads.
-    - Do NOT modify test file to fix failures — fix the implementation instead.
+    - Do NOT use `TestClient` — must be `httpx.AsyncClient`.
+    - Do NOT add `event_loop` fixtures.
+    - Do NOT share `client` across tests — each test uses its own fresh `create_app()`.
   </action>
-  <verify>pytest tests/test_phase2_repository.py -v</verify>
+  <verify>pytest tests/test_phase3_endpoints.py -v</verify>
   <done>
-    - `pytest tests/test_phase2_repository.py -v` → 8 passed, 0 failed, exit code 0.
-    - TC-2.7 passes reliably.
+    - `pytest tests/test_phase3_endpoints.py -v` → 8 passed, 0 failed, exit code 0.
+    - All `@pytest.mark.asyncio` tests run without event loop errors.
   </done>
 </task>
 
 <task type="auto">
-  <name>Run combined Phase 1 + Phase 2 gate check</name>
+  <name>Run combined Phase 1 + 2 + 3 gate check</name>
   <files>(no new files)</files>
   <action>
     Run: `pytest tests/ -v --tb=short`
 
-    If Phase 2 tests fail, fix `app/repository/job_repo.py` or `app/services/job_service.py`:
-    - TC-2.4 failure → `updated_at` not refreshed: ensure `model_copy` sets `"updated_at": datetime.now(timezone.utc)`
-    - TC-2.5 failure → transition not guarded: ensure `validate_transition()` is inside `update_status`
-    - TC-2.7 failure (duplicate IDs) → lock scope too narrow: ensure `_store[job_id] = job` is inside `with self._lock`
-    - TC-2.8 failure → result not persisted: ensure `model_copy(update={..., "result": result})`
+    Common Phase 3 failure guides:
+    - 404 on any endpoint → `app.include_router(jobs.router)` missing in `create_app()`.
+    - TC-3.5 returns 200 not 201 → Add `status_code=201` to `@router.post`.
+    - TC-3.6 fails → `StartJobRequest` needs `ConfigDict(extra='forbid')`.
+    - TC-3.8 fails (depth unchanged) → multi-request must be in SAME `async with client as c:` block.
+    - Event loop errors → ensure `pytest-asyncio>=0.23.0` is installed.
 
-    AVOID: Do NOT modify test files. Fix implementation only.
+    AVOID: Do NOT modify test file.
   </action>
-  <verify>pytest tests/ -v --tb=short 2>&1 | tail -3</verify>
+  <verify>pytest tests/ -v --tb=short 2>&1 | tail -5</verify>
   <done>
-    - `pytest tests/` → **21 passed, 0 failed** (Phase 1: 13 + Phase 2: 8)
+    - `pytest tests/` → **29 passed, 0 failed** (Phase 1: 13 + Phase 2: 8 + Phase 3: 8)
     - Exit code: 0
   </done>
 </task>
 
 ## Must-Haves
 
-- [ ] `tests/test_phase2_repository.py` — all 8 test functions, each with fresh repo
-- [ ] TC-2.7 spawns exactly 100 threads
+- [ ] `tests/test_phase3_endpoints.py` — 8 test functions, `httpx.AsyncClient` only
+- [ ] TC-3.7 and TC-3.8 multi-request in same `async with` block
 
 ## Success Criteria
 
-- [ ] `pytest tests/test_phase2_repository.py -v` → **8 passed, 0 failed**
-- [ ] `pytest tests/` → **21 passed, 0 failed**
+- [ ] `pytest tests/test_phase3_endpoints.py -v` → **8 passed, 0 failed**
+- [ ] `pytest tests/` → **29 passed, 0 failed**
 - [ ] Exit code: `0`
