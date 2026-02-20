@@ -1,69 +1,28 @@
 ---
-phase: 3
+phase: 4
 plan: 1
 wave: 1
 gap_closure: false
 ---
 
-# Plan 3.1: Hashing Utility & Request Schemas
+# Plan 4.1: ProvideInputRequest Schema & Signature Verifier
 
 ## Objective
 
-Implement the deterministic SHA-256 hashing utility and the `StartJobRequest` Pydantic schema. Pure Python — no FastAPI, no I/O. These are the building blocks for the router in Plan 3.2.
+Extend the request schemas with `ProvideInputRequest` and create the mock Ed25519 signature verifier. Pure Python — no HTTP, no FastAPI.
 
 ## Context
 
-Load these files for context:
-- `.gsd/CONTEXT.md` → Sections: "Hashing Contract"
-- `.gsd/PHASE_3.md` → `app/utils/hashing.py`, `app/schemas/requests.py`
+- `app/schemas/requests.py` (Phase 3 — contains `StartJobRequest`)
+- `app/domain/exceptions.py` (Phase 1 — contains `InvalidSignatureError`)
 
 ## Tasks
 
 <task type="auto">
-  <name>Create app/utils/__init__.py and app/utils/hashing.py</name>
-  <files>app/utils/__init__.py, app/utils/hashing.py</files>
+  <name>Add ProvideInputRequest to app/schemas/requests.py</name>
+  <files>app/schemas/requests.py</files>
   <action>
-    1. Create `app/utils/__init__.py` as a completely empty file.
-
-    2. Create `app/utils/hashing.py` with exactly this:
-
-    ```python
-    import hashlib
-    import json
-
-
-    def hash_inputs(payload: dict) -> str:
-        """
-        Deterministic SHA-256 of a dict.
-        sort_keys=True ensures field order independence.
-        separators=(',', ':') eliminates whitespace variation.
-        """
-        canonical = json.dumps(payload, sort_keys=True, separators=(',', ':'))
-        return hashlib.sha256(canonical.encode('utf-8')).hexdigest()
-    ```
-
-    AVOID:
-    - Only `hashlib` and `json` — both are stdlib. Zero external deps.
-    - Must be `sha256` — not md5, sha1, or any other algorithm.
-    - Must use `sort_keys=True` AND `separators=(',', ':')` — both required for determinism.
-    - Encoding MUST be `'utf-8'`.
-    - No caching, memoization, or side effects.
-  </action>
-  <verify>python -c "from app.utils.hashing import hash_inputs; h=hash_inputs({'b':2,'a':1}); assert h==hash_inputs({'a':1,'b':2}); assert len(h)==64; print('hashing OK', h[:16])"</verify>
-  <done>
-    - `app/utils/__init__.py` exists (empty).
-    - `hash_inputs({'b':2,'a':1}) == hash_inputs({'a':1,'b':2})` — order independent.
-    - `len(hash_inputs({})) == 64`.
-  </done>
-</task>
-
-<task type="auto">
-  <name>Create app/schemas/__init__.py and app/schemas/requests.py</name>
-  <files>app/schemas/__init__.py, app/schemas/requests.py</files>
-  <action>
-    1. Create `app/schemas/__init__.py` as a completely empty file.
-
-    2. Create `app/schemas/requests.py` with exactly this:
+    Extend `app/schemas/requests.py` by ADDING `ProvideInputRequest` after the existing `StartJobRequest`. Final file:
 
     ```python
     from typing import Any
@@ -75,72 +34,115 @@ Load these files for context:
         model_config = ConfigDict(extra='forbid')
 
         inputs: dict[str, Any]
+
+
+    class ProvideInputRequest(BaseModel):
+        model_config = ConfigDict(extra='forbid')
+
+        job_id: str
+        signature: str
+        data: dict[str, Any]
     ```
 
     AVOID:
-    - `extra='forbid'` — never 'allow' or 'ignore'. Extra fields must cause 422.
-    - No other fields, validators, or methods.
-    - No `fastapi` imports here — pure Pydantic only.
+    - Do NOT remove or modify `StartJobRequest` — Phase 3 tests depend on it.
+    - `extra='forbid'` — extra fields must cause 422.
+    - All 3 fields required — no Optional, no defaults.
+    - No fastapi imports — pure Pydantic only.
   </action>
-  <verify>python -c "from app.schemas.requests import StartJobRequest; r=StartJobRequest(inputs={'task':'x'}); print('schema OK', r.inputs)"</verify>
+  <verify>python -c "from app.schemas.requests import StartJobRequest, ProvideInputRequest; r=ProvideInputRequest(job_id='j1', signature='s1', data={}); print('schema OK', r.job_id)"</verify>
   <done>
-    - `StartJobRequest(inputs={'task':'x'})` succeeds.
-    - `StartJobRequest(inputs={}, EXTRA='bad')` raises `ValidationError`.
-    - `StartJobRequest.model_json_schema()` has `"type": "object"` and `"properties"`.
+    - Both classes importable.
+    - `ProvideInputRequest(job_id='j1', signature='s1', data={})` succeeds.
+    - Extra field raises `ValidationError`.
+    - `StartJobRequest` still works.
+  </done>
+</task>
+
+<task type="auto">
+  <name>Create app/utils/signatures.py</name>
+  <files>app/utils/signatures.py</files>
+  <action>
+    Create `app/utils/signatures.py` with exactly this:
+
+    ```python
+    from app.domain.exceptions import InvalidSignatureError
+
+
+    def verify_signature(job_id: str, signature: str) -> None:
+        """
+        Mock Ed25519 verification.
+        Contract: signature MUST equal "valid_sig_" + job_id
+        Raises InvalidSignatureError on mismatch.
+        """
+        expected = f"valid_sig_{job_id}"
+        if signature != expected:
+            raise InvalidSignatureError(f"Signature mismatch for job {job_id!r}")
+    ```
+
+    AVOID:
+    - No external crypto library — mock only.
+    - Return type MUST be `None`.
+    - Raise `InvalidSignatureError` — NOT `HTTPException`.
+    - Pure function, no side effects.
+  </action>
+  <verify>python -c "from app.utils.signatures import verify_signature; verify_signature('j1', 'valid_sig_j1'); print('sig OK')"</verify>
+  <done>
+    - `verify_signature('j1', 'valid_sig_j1')` → None (no exception).
+    - `verify_signature('j1', 'wrong')` → raises `InvalidSignatureError`.
   </done>
 </task>
 
 ## Must-Haves
 
-- [ ] `app/utils/hashing.py` — stdlib only, `sort_keys=True`, `separators=(',',':')`
-- [ ] `app/schemas/requests.py` — `extra='forbid'`, single `inputs: dict[str, Any]` field
+- [ ] Both `StartJobRequest` AND `ProvideInputRequest` in `requests.py`
+- [ ] `ProvideInputRequest`: `extra='forbid'`, fields: `job_id: str`, `signature: str`, `data: dict[str, Any]`
+- [ ] `verify_signature()` raises `InvalidSignatureError` on mismatch, no external crypto
 
 ## Success Criteria
 
-- [ ] `hash_inputs({'b':2,'a':1}) == hash_inputs({'a':1,'b':2})` ✓
-- [ ] `len(hash_inputs({})) == 64` ✓
-- [ ] `StartJobRequest(inputs={}, EXTRA='x')` raises `ValidationError` ✓
+- [ ] `from app.schemas.requests import StartJobRequest, ProvideInputRequest` exits 0
+- [ ] `verify_signature('j', 'valid_sig_j')` passes silently
+- [ ] `verify_signature('j', 'bad')` raises `InvalidSignatureError`
 
 ---
 ---
-phase: 3
+phase: 4
 plan: 2
 wave: 1
 gap_closure: false
 ---
 
-# Plan 3.2: Job Router & FastAPI App Factory
+# Plan 4.2: Final Endpoints & Global Exception Handlers
 
 ## Objective
 
-Wire up the FastAPI application with three endpoints (`/availability`, `/input_schema`, `/start_job`) and the `create_app()` factory. Repo is attached to `app.state` and injected via `Depends(get_repo)`.
+Add `GET /status/{job_id}` and `POST /provide_input` to the router, and wire four global exception handlers into `create_app()`.
 
 ## Context
 
-Load these files for context:
-- `.gsd/CONTEXT.md` → Sections: "Endpoints Contract"
-- `.gsd/PHASE_3.md` → `app/routers/jobs.py`, `app/main.py`
-- `app/utils/hashing.py`, `app/schemas/requests.py` (Plan 3.1)
-- `app/services/job_service.py`, `app/repository/job_repo.py` (Phase 2)
+- `app/routers/jobs.py` (Phase 3 — 3 existing routes)
+- `app/main.py` (Phase 3 — `create_app()`)
+- `app/utils/signatures.py` (Plan 4.1)
+- `app/schemas/requests.py` (Plan 4.1 — `ProvideInputRequest`)
 
 ## Tasks
 
 <task type="auto">
-  <name>Create app/routers/__init__.py and app/routers/jobs.py</name>
-  <files>app/routers/__init__.py, app/routers/jobs.py</files>
+  <name>Extend app/routers/jobs.py with /status and /provide_input</name>
+  <files>app/routers/jobs.py</files>
   <action>
-    1. Create `app/routers/__init__.py` as a completely empty file.
-
-    2. Create `app/routers/jobs.py` with exactly this:
+    EXTEND `app/routers/jobs.py`. Do NOT modify existing routes. The final file:
 
     ```python
     from fastapi import APIRouter, Depends, Request
 
-    from app.domain.models import Job
+    from app.domain.models import Job, JobStatus
     from app.repository.job_repo import InMemoryJobRepository
-    from app.schemas.requests import StartJobRequest
+    from app.schemas.requests import StartJobRequest, ProvideInputRequest
     from app.services import job_service
     from app.utils.hashing import hash_inputs
+    from app.utils.signatures import verify_signature
 
     router = APIRouter()
 
@@ -167,30 +169,60 @@ Load these files for context:
         input_hash = hash_inputs(body.inputs)
         job = job_service.create_job(repo, input_hash)
         return job
+
+
+    @router.get("/status/{job_id}")
+    def get_status(
+        job_id: str,
+        repo: InMemoryJobRepository = Depends(get_repo),
+    ) -> Job:
+        return repo.get(job_id)
+
+
+    @router.post("/provide_input")
+    def provide_input(
+        body: ProvideInputRequest,
+        repo: InMemoryJobRepository = Depends(get_repo),
+    ) -> Job:
+        repo.get(body.job_id)  # raises JobNotFoundError if missing
+        verify_signature(body.job_id, body.signature)  # raises InvalidSignatureError if invalid
+        job_service.advance_job_state(repo, body.job_id, JobStatus.RUNNING)
+        updated = job_service.advance_job_state(
+            repo, body.job_id, JobStatus.COMPLETED, result="Task executed successfully"
+        )
+        return updated
     ```
 
     AVOID:
-    - Do NOT instantiate `InMemoryJobRepository()` inside any route handler.
-    - Do NOT use `async def` for handlers — keep sync.
-    - `/start_job` MUST have `status_code=201`.
-    - Return `Job` object directly — FastAPI serializes it. Do NOT call `.model_dump()`.
+    - Do NOT remove or modify existing routes — Phase 3 tests depend on them.
+    - Do NOT catch domain errors inline — let them bubble to global handlers.
+    - `/provide_input`: `repo.get()` BEFORE `verify_signature()` — 404 takes priority over 403.
+    - `result="Task executed successfully"` — exact string.
   </action>
-  <verify>python -c "from app.routers.jobs import router; print('router OK', [r.path for r in router.routes])"</verify>
+  <verify>python -c "from app.routers.jobs import router; paths=[r.path for r in router.routes]; assert '/status/{job_id}' in paths and '/provide_input' in paths; print('routes OK', paths)"</verify>
   <done>
-    - `router.routes` has 3 entries: `/availability`, `/input_schema`, `/start_job`.
-    - `get_repo` reads from `request.app.state.repo`.
+    - 5 routes: `/availability`, `/input_schema`, `/start_job`, `/status/{job_id}`, `/provide_input`.
+    - `JobStatus` imported.
+    - Phase 3 routes untouched.
   </done>
 </task>
 
 <task type="auto">
-  <name>Create app/main.py</name>
+  <name>Add global exception handlers to app/main.py</name>
   <files>app/main.py</files>
   <action>
-    Create `app/main.py` with exactly this:
+    Replace `app/main.py` with this complete implementation:
 
     ```python
-    from fastapi import FastAPI
+    from fastapi import FastAPI, Request
+    from fastapi.exceptions import RequestValidationError
+    from fastapi.responses import JSONResponse
 
+    from app.domain.exceptions import (
+        InvalidSignatureError,
+        InvalidStateTransitionError,
+        JobNotFoundError,
+    )
     from app.repository.job_repo import InMemoryJobRepository
     from app.routers import jobs
 
@@ -200,6 +232,26 @@ Load these files for context:
         repo = InMemoryJobRepository()
         app.state.repo = repo
         app.include_router(jobs.router)
+
+        @app.exception_handler(RequestValidationError)
+        async def validation_exception_handler(request: Request, exc: RequestValidationError):
+            return JSONResponse(
+                status_code=422,
+                content={"detail": exc.errors(), "body": exc.body},
+            )
+
+        @app.exception_handler(JobNotFoundError)
+        async def job_not_found_handler(request: Request, exc: JobNotFoundError):
+            return JSONResponse(status_code=404, content={"detail": str(exc)})
+
+        @app.exception_handler(InvalidStateTransitionError)
+        async def invalid_transition_handler(request: Request, exc: InvalidStateTransitionError):
+            return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+        @app.exception_handler(InvalidSignatureError)
+        async def invalid_signature_handler(request: Request, exc: InvalidSignatureError):
+            return JSONResponse(status_code=403, content={"detail": str(exc)})
+
         return app
 
 
@@ -207,60 +259,61 @@ Load these files for context:
     ```
 
     AVOID:
-    - `create_app()` must be the exact function name — tests call it directly.
-    - Module-level `app = create_app()` is REQUIRED for uvicorn.
-    - No middleware, CORS, or lifespan handlers in this phase.
-    - Each `create_app()` call MUST return a fresh app with a fresh repo — test isolation depends on this.
+    - Handlers MUST be `async def` — required by FastAPI.
+    - Handlers defined INSIDE `create_app()` using `@app.exception_handler(...)`.
+    - `RequestValidationError` handler MUST include `"body": exc.body`.
+    - `app = create_app()` at module level MUST remain.
+    - No inline `HTTPException` for domain errors.
   </action>
-  <verify>python -c "from app.main import create_app; app=create_app(); print('app OK, routes:', [r.path for r in app.routes])"</verify>
+  <verify>python -c "from app.main import create_app; app=create_app(); print('handlers OK:', len(app.exception_handlers), 'registered')"</verify>
   <done>
-    - `create_app()` returns FastAPI with 3 routes.
-    - `create_app().state.repo` is `InMemoryJobRepository`.
-    - Module-level `app` exists and is importable.
+    - `create_app()` exits 0.
+    - All Phase 3 behaviour preserved.
+    - 4 custom exception handlers registered.
   </done>
 </task>
 
 ## Must-Haves
 
-- [ ] `app/routers/jobs.py` — 3 endpoints, `get_repo` dependency, no repo in handlers
-- [ ] `app/main.py` — `create_app()` factory, `app.state.repo` set, module-level `app`
-- [ ] `/start_job` returns HTTP 201
+- [ ] 5 routes: Phase 3 routes + `/status/{job_id}` + `/provide_input`
+- [ ] `/provide_input`: `repo.get()` BEFORE `verify_signature()`
+- [ ] Both state advances: AWAITING_PAYMENT→RUNNING, then RUNNING→COMPLETED
+- [ ] 4 global handlers: 422 / 404 / 409 / 403
 
 ## Success Criteria
 
-- [ ] `from app.main import create_app; create_app()` exits 0
-- [ ] Routes: `/availability` (GET), `/input_schema` (GET), `/start_job` (POST 201)
+- [ ] `router.routes` has 5 entries
+- [ ] All Phase 3 routes still pass
+- [ ] `create_app()` has 4 custom exception handlers
 
 ---
 ---
-phase: 3
+phase: 4
 plan: 3
 wave: 2
 gap_closure: false
 ---
 
-# Plan 3.3: Phase 3 Test Suite
+# Plan 4.3: Phase 4 Test Suite
 
 ## Objective
 
-Write and pass the complete Pytest verification suite for Phase 3. All 8 test cases must pass using `httpx.AsyncClient` with `ASGITransport`. Runs AFTER Plans 3.1 and 3.2 complete.
+Write and pass the complete Pytest verification suite for Phase 4. All 8 test cases must pass. Runs AFTER Plans 4.1 and 4.2 complete.
 
 ## Context
 
-Load these files for context:
-- `.gsd/PHASE_3.md` → "Verification Criteria" section
-- `app/main.py`, `app/utils/hashing.py`
+- `.gsd/PHASE_4.md` → "Verification Criteria" section
+- `app/main.py`, `app/routers/jobs.py`, `app/utils/signatures.py`
 
 ## Tasks
 
 <task type="auto">
-  <name>Create tests/test_phase3_endpoints.py</name>
-  <files>tests/test_phase3_endpoints.py</files>
+  <name>Create tests/test_phase4_full_flow.py</name>
+  <files>tests/test_phase4_full_flow.py</files>
   <action>
-    Create `tests/test_phase3_endpoints.py` with ALL 8 test cases exactly as specified:
+    Create `tests/test_phase4_full_flow.py` with ALL 8 test cases:
 
     ```python
-    import hashlib
     import pytest
     import httpx
 
@@ -276,132 +329,161 @@ Load these files for context:
         )
 
 
-    # TC-3.1: hash_inputs is deterministic (field-order independent)
-    def test_hash_inputs_deterministic():
-        from app.utils.hashing import hash_inputs
-        h1 = hash_inputs({"b": 2, "a": 1})
-        h2 = hash_inputs({"a": 1, "b": 2})
-        assert h1 == h2
-        assert len(h1) == 64  # SHA-256 hex = 64 chars
-
-
-    # TC-3.2: hash_inputs produces correct SHA-256
-    def test_hash_inputs_correctness():
-        from app.utils.hashing import hash_inputs
-        payload = {"task": "hello"}
-        expected_canonical = '{"task":"hello"}'
-        expected_hash = hashlib.sha256(expected_canonical.encode()).hexdigest()
-        assert hash_inputs(payload) == expected_hash
-
-
-    # TC-3.3: GET /availability returns 200 with correct shape
-    @pytest.mark.asyncio
-    async def test_availability(client):
-        async with client as c:
-            r = await c.get("/availability")
-        assert r.status_code == 200
-        data = r.json()
-        assert data["available"] is True
-        assert isinstance(data["queue_depth"], int)
-
-
-    # TC-3.4: GET /input_schema returns 200 with a JSON Schema object
-    @pytest.mark.asyncio
-    async def test_input_schema(client):
-        async with client as c:
-            r = await c.get("/input_schema")
-        assert r.status_code == 200
-        schema = r.json()
-        assert schema["type"] == "object"
-        assert "properties" in schema
-
-
-    # TC-3.5: POST /start_job creates a job and returns 201
-    @pytest.mark.asyncio
-    async def test_start_job_creates_job(client):
-        async with client as c:
-            r = await c.post("/start_job", json={"inputs": {"task": "do_work"}})
+    async def _create_job(c: httpx.AsyncClient) -> dict:
+        r = await c.post("/start_job", json={"inputs": {"task": "test_task"}})
         assert r.status_code == 201
-        job = r.json()
-        assert job["status"] == "awaiting_payment"
-        assert len(job["input_hash"]) == 64
-        assert job["blockchain_identifier"].startswith("mock_bc_")
+        return r.json()
 
 
-    # TC-3.6: POST /start_job with extra top-level fields returns 422
+    # TC-4.1: GET /status/{job_id} returns the correct job
     @pytest.mark.asyncio
-    async def test_start_job_rejects_extra_fields(client):
+    async def test_get_status_returns_job(client):
         async with client as c:
-            r = await c.post(
-                "/start_job",
-                json={"inputs": {"task": "x"}, "hacker_field": "evil"},
-            )
+            job = await _create_job(c)
+            r = await c.get(f"/status/{job['job_id']}")
+        assert r.status_code == 200
+        assert r.json()["job_id"] == job["job_id"]
+
+
+    # TC-4.2: GET /status with unknown ID returns 404
+    @pytest.mark.asyncio
+    async def test_get_status_unknown_job(client):
+        async with client as c:
+            r = await c.get("/status/nonexistent-000")
+        assert r.status_code == 404
+        assert "not found" in r.json()["detail"].lower()
+
+
+    # TC-4.3: POST /provide_input with valid signature completes the job
+    @pytest.mark.asyncio
+    async def test_provide_input_valid_signature(client):
+        async with client as c:
+            job = await _create_job(c)
+            job_id = job["job_id"]
+            r = await c.post("/provide_input", json={
+                "job_id": job_id,
+                "signature": f"valid_sig_{job_id}",
+                "data": {"confirmation": "payment_received"},
+            })
+        assert r.status_code == 200
+        assert r.json()["status"] == "completed"
+        assert r.json()["result"] is not None
+
+
+    # TC-4.4: POST /provide_input with invalid signature returns 403
+    @pytest.mark.asyncio
+    async def test_provide_input_invalid_signature(client):
+        async with client as c:
+            job = await _create_job(c)
+            r = await c.post("/provide_input", json={
+                "job_id": job["job_id"],
+                "signature": "wrong_signature",
+                "data": {},
+            })
+        assert r.status_code == 403
+
+
+    # TC-4.5: POST /provide_input for unknown job returns 404
+    @pytest.mark.asyncio
+    async def test_provide_input_unknown_job(client):
+        async with client as c:
+            r = await c.post("/provide_input", json={
+                "job_id": "ghost-job-id",
+                "signature": "valid_sig_ghost-job-id",
+                "data": {},
+            })
+        assert r.status_code == 404
+
+
+    # TC-4.6: POST /provide_input with extra fields returns 422
+    @pytest.mark.asyncio
+    async def test_provide_input_rejects_extra_fields(client):
+        async with client as c:
+            job = await _create_job(c)
+            r = await c.post("/provide_input", json={
+                "job_id": job["job_id"],
+                "signature": f"valid_sig_{job['job_id']}",
+                "data": {},
+                "evil_extra": "hacked",
+            })
         assert r.status_code == 422
 
 
-    # TC-3.7: POST /start_job is deterministic — same inputs produce same hash
+    # TC-4.7: 422 response body is JSON with "detail" key
     @pytest.mark.asyncio
-    async def test_start_job_hash_determinism(client):
-        payload = {"inputs": {"b": 2, "a": 1}}
+    async def test_422_response_shape(client):
         async with client as c:
-            r1 = await c.post("/start_job", json=payload)
-            r2 = await c.post("/start_job", json=payload)
-        assert r1.json()["input_hash"] == r2.json()["input_hash"]
+            r = await c.post("/start_job", json={"bad_field": "no_inputs"})
+        assert r.status_code == 422
+        body = r.json()
+        assert "detail" in body
 
 
-    # TC-3.8: queue_depth increases after job creation
+    # TC-4.8: Full lifecycle — awaiting_payment -> running -> completed
     @pytest.mark.asyncio
-    async def test_queue_depth_increases(client):
+    async def test_full_job_lifecycle(client):
         async with client as c:
-            before = (await c.get("/availability")).json()["queue_depth"]
-            await c.post("/start_job", json={"inputs": {"task": "x"}})
-            after = (await c.get("/availability")).json()["queue_depth"]
-        assert after == before + 1
+            job = await _create_job(c)
+            assert job["status"] == "awaiting_payment"
+            job_id = job["job_id"]
+
+            r = await c.post("/provide_input", json={
+                "job_id": job_id,
+                "signature": f"valid_sig_{job_id}",
+                "data": {"confirm": True},
+            })
+            final = r.json()
+            assert final["status"] == "completed"
+
+            status_r = await c.get(f"/status/{job_id}")
+            assert status_r.json()["status"] == "completed"
     ```
 
-    KEY: TC-3.7 and TC-3.8 share state across requests — they go inside ONE `async with client as c:` block.
+    KEY: `_create_job(c)` takes an already-opened client `c`. Call it inside `async with client as c:`.
 
     AVOID:
-    - Do NOT use `TestClient` — must be `httpx.AsyncClient`.
-    - Do NOT add `event_loop` fixtures.
-    - Do NOT share `client` across tests — each test uses its own fresh `create_app()`.
+    - Do NOT use `TestClient`.
+    - Each test get its own fresh app via the fixture.
+    - TC-4.8 must share state — all 3 requests in ONE `async with client as c:` block.
   </action>
-  <verify>pytest tests/test_phase3_endpoints.py -v</verify>
+  <verify>pytest tests/test_phase4_full_flow.py -v</verify>
   <done>
-    - `pytest tests/test_phase3_endpoints.py -v` → 8 passed, 0 failed, exit code 0.
-    - All `@pytest.mark.asyncio` tests run without event loop errors.
+    - 8 passed, 0 failed.
+    - TC-4.2 has "not found" in detail.
+    - TC-4.8 full lifecycle works end-to-end.
   </done>
 </task>
 
 <task type="auto">
-  <name>Run combined Phase 1 + 2 + 3 gate check</name>
+  <name>Run combined Phase 1+2+3+4 gate check</name>
   <files>(no new files)</files>
   <action>
     Run: `pytest tests/ -v --tb=short`
 
-    Common Phase 3 failure guides:
-    - 404 on any endpoint → `app.include_router(jobs.router)` missing in `create_app()`.
-    - TC-3.5 returns 200 not 201 → Add `status_code=201` to `@router.post`.
-    - TC-3.6 fails → `StartJobRequest` needs `ConfigDict(extra='forbid')`.
-    - TC-3.8 fails (depth unchanged) → multi-request must be in SAME `async with client as c:` block.
-    - Event loop errors → ensure `pytest-asyncio>=0.23.0` is installed.
+    Common failures:
+    - 500 instead of 404/403 → exception handler not in `create_app()`.
+    - TC-4.2 "not found" fails → check `str(JobNotFoundError)` contains "not found".
+    - TC-4.6 gets 200 → `ProvideInputRequest` needs `extra='forbid'`.
+    - TC-4.3 result is None → check `result="Task executed successfully"` in second `advance_job_state`.
+    - Phase 3 breaks → `StartJobRequest` removed from `requests.py` — must have BOTH classes.
 
-    AVOID: Do NOT modify test file.
+    AVOID: Do NOT modify test files.
   </action>
   <verify>pytest tests/ -v --tb=short 2>&1 | tail -5</verify>
   <done>
-    - `pytest tests/` → **29 passed, 0 failed** (Phase 1: 13 + Phase 2: 8 + Phase 3: 8)
+    - `pytest tests/` → **37 passed, 0 failed** (Phase 1: 13 + Phase 2: 8 + Phase 3: 8 + Phase 4: 8)
     - Exit code: 0
   </done>
 </task>
 
 ## Must-Haves
 
-- [ ] `tests/test_phase3_endpoints.py` — 8 test functions, `httpx.AsyncClient` only
-- [ ] TC-3.7 and TC-3.8 multi-request in same `async with` block
+- [ ] 8 test functions in `test_phase4_full_flow.py`
+- [ ] `_create_job(c)` helper called with open client inside `async with`
+- [ ] TC-4.8 all requests in ONE `async with client as c:` block
 
 ## Success Criteria
 
-- [ ] `pytest tests/test_phase3_endpoints.py -v` → **8 passed, 0 failed**
-- [ ] `pytest tests/` → **29 passed, 0 failed**
+- [ ] `pytest tests/test_phase4_full_flow.py -v` → **8 passed, 0 failed**
+- [ ] `pytest tests/` → **37 passed, 0 failed**
 - [ ] Exit code: `0`
