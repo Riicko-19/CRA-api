@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pydantic_settings import BaseSettings
 from masumi import Config as MasumiConfig
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 
 
 class Settings(BaseSettings):
@@ -22,3 +24,5 @@ masumi_config = MasumiConfig(
     payment_service_url=settings.payment_service_url,
     payment_api_key=settings.payment_api_key,
 )
+
+limiter = Limiter(key_func=get_remote_address)

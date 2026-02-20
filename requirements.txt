@@ -8,3 +8,4 @@ masumi>=0.1.0
 python-dotenv>=1.0.0
 pydantic-settings>=2.0.0
 qdrant-client==1.11.3
+slowapi>=0.1.9

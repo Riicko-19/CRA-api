@@ -2,11 +2,16 @@ import pytest
 import httpx
 
 from app.main import create_app
+from app.services.agent_runner import execute_agent_task
 
 
 @pytest.fixture
-def client():
-    app = create_app()
+def app():
+    return create_app()
+
+
+@pytest.fixture
+def client(app):
     return httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app),
         base_url="http://test",
@@ -38,9 +43,11 @@ async def test_get_status_unknown_job(client):
     assert "not found" in r.json()["detail"].lower()
 
 
-# TC-4.3: POST /provide_input with valid signature completes the job
+# TC-4.3: POST /provide_input with valid signature → job is RUNNING immediately,
+#          then the background task runs (synchronously in ASGI test transport)
+#          and moves it to COMPLETED.
 @pytest.mark.asyncio
-async def test_provide_input_valid_signature(client):
+async def test_provide_input_valid_signature(client, app):
     async with client as c:
         job = await _create_job(c)
         job_id = job["job_id"]
@@ -49,9 +56,15 @@ async def test_provide_input_valid_signature(client):
             "signature": f"valid_sig_{job_id}",
             "data": {"confirmation": "payment_received"},
         })
+    # Endpoint returns RUNNING state immediately
     assert r.status_code == 200
-    assert r.json()["status"] == "completed"
-    assert r.json()["result"] is not None
+    assert r.json()["status"] == "running"
+
+    # httpx ASGI transport runs BackgroundTasks synchronously after the response.
+    # By the time the `async with` block exits, the background job is COMPLETED.
+    completed_job = app.state.repo.get(job_id)
+    assert completed_job.status == "completed"
+    assert completed_job.result is not None
 
 
 # TC-4.4: POST /provide_input with invalid signature returns 403
@@ -103,9 +116,10 @@ async def test_422_response_shape(client):
     assert "detail" in body
 
 
-# TC-4.8: Full lifecycle — awaiting_payment -> running -> completed
+# TC-4.8: Full lifecycle — awaiting_payment → running (HTTP response)
+#          → completed (background task runs synchronously in test transport)
 @pytest.mark.asyncio
-async def test_full_job_lifecycle(client):
+async def test_full_job_lifecycle(client, app):
     async with client as c:
         job = await _create_job(c)
         assert job["status"] == "awaiting_payment"
@@ -116,8 +130,20 @@ async def test_full_job_lifecycle(client):
             "signature": f"valid_sig_{job_id}",
             "data": {"confirm": True},
         })
-        final = r.json()
-        assert final["status"] == "completed"
+        # Immediate HTTP response is RUNNING
+        assert r.json()["status"] == "running"
 
-        status_r = await c.get(f"/status/{job_id}")
-        assert status_r.json()["status"] == "completed"
+    # After the async-with block exits, background task has already completed
+    # (httpx ASGI transport is synchronous for BackgroundTasks).
+    assert app.state.repo.get(job_id).status == "completed"
+
+
+# TC-8.1: /start_job respects 5/minute rate limit — 6th request gets 429
+@pytest.mark.asyncio
+async def test_start_job_rate_limit(client):
+    async with client as c:
+        for _ in range(5):
+            r = await c.post("/start_job", json={"inputs": {"task": "t"}})
+            assert r.status_code == 201
+        r = await c.post("/start_job", json={"inputs": {"task": "t"}})
+    assert r.status_code == 429
