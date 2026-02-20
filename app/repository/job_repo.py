@@ -1,4 +1,5 @@
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
@@ -15,6 +16,7 @@ class InMemoryJobRepository:
     def create(self, input_hash: str) -> Job:
         job_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc)
+        now_ts = int(time.time())
         job = Job(
             job_id=job_id,
             status=JobStatus.AWAITING_PAYMENT,
@@ -22,6 +24,10 @@ class InMemoryJobRepository:
             blockchain_identifier="mock_bc_" + job_id[:8],
             created_at=now,
             updated_at=now,
+            pay_by_time=now_ts + 3600,
+            seller_vkey="mock_vkey_" + job_id[:8],
+            submit_result_time=now_ts + 7200,
+            unlock_time=now_ts + 86400,
         )
         with self._lock:
             self._store[job_id] = job

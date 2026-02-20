@@ -1,3 +1,4 @@
+import time
 import pytest
 from datetime import datetime
 from pydantic import ValidationError
@@ -10,6 +11,7 @@ from app.domain.exceptions import InvalidStateTransitionError
 
 def _make_valid_job(**overrides) -> Job:
     """Factory for a valid Job instance."""
+    now_ts = int(time.time())
     defaults = dict(
         job_id="test-job-id-0001",
         status=JobStatus.AWAITING_PAYMENT,
@@ -17,15 +19,20 @@ def _make_valid_job(**overrides) -> Job:
         blockchain_identifier="mock_bc_test",
         created_at=datetime.utcnow(),
         updated_at=datetime.utcnow(),
+        pay_by_time=now_ts + 3600,
+        seller_vkey="mock_vkey_test",
+        submit_result_time=now_ts + 7200,
+        unlock_time=now_ts + 86400,
     )
     defaults.update(overrides)
     return Job(**defaults)
 
 
-# TC-1.1: JobStatus has exactly 4 members
+# TC-1.1: JobStatus has exactly 5 members
 def test_job_status_members():
     assert set(JobStatus) == {
         JobStatus.AWAITING_PAYMENT,
+        JobStatus.AWAITING_INPUT,
         JobStatus.RUNNING,
         JobStatus.COMPLETED,
         JobStatus.FAILED,
@@ -34,6 +41,7 @@ def test_job_status_members():
 
 # TC-1.2: Job model rejects extra fields
 def test_job_rejects_extra_fields():
+    now_ts = int(time.time())
     with pytest.raises(ValidationError):
         Job(
             job_id="abc",
@@ -42,6 +50,10 @@ def test_job_rejects_extra_fields():
             blockchain_identifier="mock_bc_abc",
             created_at=datetime.utcnow(),
             updated_at=datetime.utcnow(),
+            pay_by_time=now_ts + 3600,
+            seller_vkey="vk_test",
+            submit_result_time=now_ts + 7200,
+            unlock_time=now_ts + 86400,
             EXTRA_FIELD="should_fail",
         )
 
@@ -58,6 +70,8 @@ def test_job_is_frozen():
     (JobStatus.AWAITING_PAYMENT, JobStatus.RUNNING),
     (JobStatus.RUNNING, JobStatus.COMPLETED),
     (JobStatus.RUNNING, JobStatus.FAILED),
+    (JobStatus.RUNNING, JobStatus.AWAITING_INPUT),
+    (JobStatus.AWAITING_INPUT, JobStatus.RUNNING),
 ])
 def test_legal_transitions(from_s, to_s):
     validate_transition(from_s, to_s)  # must NOT raise
@@ -71,6 +85,8 @@ def test_legal_transitions(from_s, to_s):
     (JobStatus.FAILED, JobStatus.RUNNING),
     (JobStatus.COMPLETED, JobStatus.AWAITING_PAYMENT),
     (JobStatus.RUNNING, JobStatus.AWAITING_PAYMENT),
+    (JobStatus.AWAITING_INPUT, JobStatus.COMPLETED),
+    (JobStatus.AWAITING_INPUT, JobStatus.FAILED),
 ])
 def test_illegal_transitions(from_s, to_s):
     with pytest.raises(InvalidStateTransitionError):

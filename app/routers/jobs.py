@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, Request
+from fastapi.responses import JSONResponse
 
 from app.domain.models import Job, JobStatus
 from app.repository.job_repo import InMemoryJobRepository
@@ -15,8 +16,8 @@ def get_repo(request: Request) -> InMemoryJobRepository:
 
 
 @router.get("/availability")
-def availability(repo: InMemoryJobRepository = Depends(get_repo)):
-    return {"available": True, "queue_depth": repo.count()}
+def availability():
+    return {"status": "available", "service_type": "masumi-agent"}
 
 
 @router.get("/input_schema")
@@ -24,7 +25,7 @@ def input_schema():
     return StartJobRequest.model_json_schema()
 
 
-@router.post("/start_job", status_code=201)
+@router.post("/start_job", status_code=201, response_model=Job, response_model_by_alias=True)
 def start_job(
     body: StartJobRequest,
     repo: InMemoryJobRepository = Depends(get_repo),
@@ -34,7 +35,7 @@ def start_job(
     return job
 
 
-@router.get("/status/{job_id}")
+@router.get("/status/{job_id}", response_model=Job, response_model_by_alias=True)
 def get_status(
     job_id: str,
     repo: InMemoryJobRepository = Depends(get_repo),
@@ -42,7 +43,7 @@ def get_status(
     return repo.get(job_id)
 
 
-@router.post("/provide_input")
+@router.post("/provide_input", response_model=Job, response_model_by_alias=True)
 def provide_input(
     body: ProvideInputRequest,
     repo: InMemoryJobRepository = Depends(get_repo),
