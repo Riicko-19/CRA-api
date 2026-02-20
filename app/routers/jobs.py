@@ -1,10 +1,11 @@
 from fastapi import APIRouter, Depends, Request
 
-from app.domain.models import Job
+from app.domain.models import Job, JobStatus
 from app.repository.job_repo import InMemoryJobRepository
-from app.schemas.requests import StartJobRequest
+from app.schemas.requests import StartJobRequest, ProvideInputRequest
 from app.services import job_service
 from app.utils.hashing import hash_inputs
+from app.utils.signatures import verify_signature
 
 router = APIRouter()
 
@@ -31,3 +32,25 @@ def start_job(
     input_hash = hash_inputs(body.inputs)
     job = job_service.create_job(repo, input_hash)
     return job
+
+
+@router.get("/status/{job_id}")
+def get_status(
+    job_id: str,
+    repo: InMemoryJobRepository = Depends(get_repo),
+) -> Job:
+    return repo.get(job_id)
+
+
+@router.post("/provide_input")
+def provide_input(
+    body: ProvideInputRequest,
+    repo: InMemoryJobRepository = Depends(get_repo),
+) -> Job:
+    repo.get(body.job_id)  # raises JobNotFoundError if missing
+    verify_signature(body.job_id, body.signature)  # raises InvalidSignatureError if invalid
+    job_service.advance_job_state(repo, body.job_id, JobStatus.RUNNING)
+    updated = job_service.advance_job_state(
+        repo, body.job_id, JobStatus.COMPLETED, result="Task executed successfully"
+    )
+    return updated
