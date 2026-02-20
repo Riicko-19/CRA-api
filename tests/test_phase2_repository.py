@@ -6,13 +6,32 @@ from app.domain.exceptions import JobNotFoundError, InvalidStateTransitionError
 from app.repository.job_repo import InMemoryJobRepository
 
 
+# Helper: create a job with all required SDK-derived fields
+_BC = "mock_bc_test"
+_VK = "mock_vkey_test"
+_PBT = 9_999_999_999
+_SRT = 9_999_999_999 + 3_600
+_UT  = 9_999_999_999 + 86_400
+
+
+def _make_job(repo: InMemoryJobRepository, input_hash: str):
+    return repo.create(
+        input_hash=input_hash,
+        blockchain_identifier=_BC,
+        pay_by_time=_PBT,
+        seller_vkey=_VK,
+        submit_result_time=_SRT,
+        unlock_time=_UT,
+    )
+
+
 # TC-2.1: create() returns a job in AWAITING_PAYMENT state
 def test_create_job_initial_state():
     repo = InMemoryJobRepository()
-    job = repo.create(input_hash="a" * 64)
+    job = _make_job(repo, "a" * 64)
     assert job.status == JobStatus.AWAITING_PAYMENT
     assert job.input_hash == "a" * 64
-    assert job.blockchain_identifier.startswith("mock_bc_")
+    assert job.blockchain_identifier == _BC
     assert job.result is None
     assert job.error is None
 
@@ -20,7 +39,7 @@ def test_create_job_initial_state():
 # TC-2.2: get() returns the same job that was created
 def test_get_returns_created_job():
     repo = InMemoryJobRepository()
-    job = repo.create(input_hash="b" * 64)
+    job = _make_job(repo, "b" * 64)
     retrieved = repo.get(job.job_id)
     assert retrieved.job_id == job.job_id
 
@@ -35,7 +54,7 @@ def test_get_unknown_job_raises():
 # TC-2.4: Legal state transition updates status and updated_at
 def test_legal_transition_updates_job():
     repo = InMemoryJobRepository()
-    job = repo.create(input_hash="c" * 64)
+    job = _make_job(repo, "c" * 64)
     updated = repo.update_status(job.job_id, JobStatus.RUNNING)
     assert updated.status == JobStatus.RUNNING
     assert updated.updated_at >= job.updated_at
@@ -44,7 +63,7 @@ def test_legal_transition_updates_job():
 # TC-2.5: Illegal state transition raises InvalidStateTransitionError
 def test_illegal_transition_raises():
     repo = InMemoryJobRepository()
-    job = repo.create(input_hash="d" * 64)
+    job = _make_job(repo, "d" * 64)
     with pytest.raises(InvalidStateTransitionError):
         repo.update_status(job.job_id, JobStatus.COMPLETED)  # skip RUNNING
 
@@ -53,8 +72,8 @@ def test_illegal_transition_raises():
 def test_count_reflects_stored_jobs():
     repo = InMemoryJobRepository()
     assert repo.count() == 0
-    repo.create("e" * 64)
-    repo.create("f" * 64)
+    _make_job(repo, "e" * 64)
+    _make_job(repo, "f" * 64)
     assert repo.count() == 2
 
 
@@ -65,7 +84,7 @@ def test_concurrent_creates_are_unique():
     lock = threading.Lock()
 
     def worker():
-        job = repo.create("g" * 64)
+        job = _make_job(repo, "g" * 64)
         with lock:
             ids.append(job.job_id)
 
@@ -82,7 +101,7 @@ def test_concurrent_creates_are_unique():
 # TC-2.8: completed job with result is stored correctly
 def test_completed_job_stores_result():
     repo = InMemoryJobRepository()
-    job = repo.create("h" * 64)
+    job = _make_job(repo, "h" * 64)
     repo.update_status(job.job_id, JobStatus.RUNNING)
     done = repo.update_status(
         job.job_id, JobStatus.COMPLETED, result="output_data"
