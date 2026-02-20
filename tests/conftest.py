@@ -1,5 +1,5 @@
 import pytest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 # Dummy payload matching the masumi SDK response shape.
 # payByTime = year 2286 — always passes test_pay_by_time_is_future.
@@ -25,5 +25,19 @@ def mock_payment_sdk():
         "masumi.Payment.create_payment_request",
         new_callable=AsyncMock,
         return_value=MOCK_PAYMENT_DATA,
+    ) as mock:
+        yield mock
+
+
+@pytest.fixture(autouse=True)
+def mock_qdrant_client():
+    """Patch qdrant_client.AsyncQdrantClient for ALL tests.
+
+    autouse=True means every test — in every file — gets this patch
+    automatically. Tests never attempt a live TCP connection to Qdrant.
+    """
+    with patch(
+        "qdrant_client.AsyncQdrantClient",
+        return_value=MagicMock(),
     ) as mock:
         yield mock

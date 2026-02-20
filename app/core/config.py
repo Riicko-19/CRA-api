@@ -10,6 +10,8 @@ class Settings(BaseSettings):
     payment_service_url: str = "https://payment.masumi.network/api/v1"
     payment_api_key: str = "mock_api_key"
     masumi_network: str = "Preprod"
+    qdrant_url: str = ":memory:"
+    qdrant_api_key: str | None = None
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 

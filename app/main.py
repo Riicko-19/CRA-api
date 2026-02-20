@@ -1,6 +1,7 @@
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedResponse
 
 from app.domain.exceptions import (
     InvalidSignatureError,
@@ -35,6 +36,24 @@ def create_app() -> FastAPI:
     @app.exception_handler(InvalidSignatureError)
     async def invalid_signature_handler(request: Request, exc: InvalidSignatureError):
         return JSONResponse(status_code=403, content={"detail": str(exc)})
+
+    @app.exception_handler(ResponseHandlingException)
+    async def qdrant_response_handling_handler(
+        request: Request, exc: ResponseHandlingException
+    ):
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "Vector database temporarily unavailable. Please try again later."},
+        )
+
+    @app.exception_handler(UnexpectedResponse)
+    async def qdrant_unexpected_response_handler(
+        request: Request, exc: UnexpectedResponse
+    ):
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "Vector database temporarily unavailable. Please try again later."},
+        )
 
     return app
 
