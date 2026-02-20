@@ -1,336 +1,394 @@
 ---
-phase: 1
+phase: 2
 plan: 1
 wave: 1
 gap_closure: false
 ---
 
-# Plan 1.1: Domain Exceptions & Job Models
+# Plan 2.1: InMemoryJobRepository
 
 ## Objective
 
-Create the pure domain layer — custom exceptions and Pydantic v2 models with the `JobStatus` enum, `Job` model, `LEGAL_TRANSITIONS` map, and `validate_transition()` function. This is the foundation every other phase imports from. Zero I/O. Zero HTTP.
+Build the thread-safe, in-memory persistence layer. This is the only component allowed to own `Job` storage. It enforces the state machine strictly — no caller can bypass `validate_transition()`. No HTTP, no FastAPI, no I/O.
 
 ## Context
 
 Load these files for context:
 - `.gsd/SPEC.md`
-- `.gsd/CONTEXT.md` → Sections: "Domain Models", "Job Lifecycle — State Machine", "Core Philosophy"
+- `.gsd/CONTEXT.md` → Sections: "Architecture", "Job Lifecycle — State Machine"
+- `app/domain/models.py` — Job, JobStatus, LEGAL_TRANSITIONS, validate_transition
+- `app/domain/exceptions.py` — JobNotFoundError, InvalidStateTransitionError
 
 ## Tasks
 
 <task type="auto">
-  <name>Create app/domain/exceptions.py</name>
-  <files>app/domain/__init__.py, app/domain/exceptions.py</files>
+  <name>Create app/repository/__init__.py (empty)</name>
+  <files>app/repository/__init__.py</files>
   <action>
-    1. Create `app/domain/__init__.py` as an empty file.
-    2. Create `app/domain/exceptions.py` with exactly these three exception classes — no Pydantic, no imports beyond builtins:
-
-    ```python
-    class JobNotFoundError(Exception):
-        def __init__(self, job_id: str):
-            self.job_id = job_id
-            super().__init__(f"Job {job_id!r} not found")
-
-    class InvalidStateTransitionError(Exception):
-        def __init__(self, from_state: str, to_state: str):
-            self.from_state = from_state
-            self.to_state = to_state
-            super().__init__(f"Cannot transition from '{from_state}' to '{to_state}'")
-
-    class InvalidSignatureError(Exception):
-        pass
-    ```
-
-    AVOID:
-    - Do NOT import anything (no pydantic, no fastapi, no stdlib).
-    - Do NOT add extra methods or attributes beyond what is shown.
-    - The `__init__` signatures must match EXACTLY — used by tests via `e.from_state`, `e.to_state`, `e.job_id`.
+    Create `app/repository/__init__.py` as a completely empty file.
+    No content, no imports, no comments.
   </action>
-  <verify>python -c "from app.domain.exceptions import JobNotFoundError, InvalidStateTransitionError, InvalidSignatureError; print('OK')"</verify>
+  <verify>python -c "import app.repository; print('OK')"</verify>
   <done>
-    - `app/domain/__init__.py` exists and is empty.
-    - `app/domain/exceptions.py` imports cleanly with zero errors.
-    - `JobNotFoundError("x").job_id == "x"` is True.
-    - `InvalidStateTransitionError("a","b").from_state == "a"` is True.
-    - `InvalidStateTransitionError("a","b").to_state == "b"` is True.
+    - `app/repository/__init__.py` exists and is empty.
+    - `import app.repository` exits 0.
   </done>
 </task>
 
 <task type="auto">
-  <name>Create app/domain/models.py</name>
-  <files>app/domain/models.py</files>
+  <name>Create app/repository/job_repo.py</name>
+  <files>app/repository/job_repo.py</files>
   <action>
-    Create `app/domain/models.py` with the following — in this exact order:
+    Create `app/repository/job_repo.py` with the following implementation exactly:
 
     **Imports (ONLY these):**
     ```python
-    from __future__ import annotations
-    from datetime import datetime
-    from enum import Enum
+    import threading
+    import uuid
+    from datetime import datetime, timezone
     from typing import Optional
-    from pydantic import BaseModel, ConfigDict
-    from app.domain.exceptions import InvalidStateTransitionError
+
+    from app.domain.models import Job, JobStatus, validate_transition
+    from app.domain.exceptions import JobNotFoundError
     ```
 
-    **1. JobStatus enum:**
+    **Class:**
     ```python
-    class JobStatus(str, Enum):
-        AWAITING_PAYMENT = "awaiting_payment"
-        RUNNING = "running"
-        COMPLETED = "completed"
-        FAILED = "failed"
-    ```
+    class InMemoryJobRepository:
+        def __init__(self):
+            self._store: dict[str, Job] = {}
+            self._lock = threading.Lock()
 
-    **2. Job model (Pydantic v2):**
-    ```python
-    class Job(BaseModel):
-        model_config = ConfigDict(extra='forbid', frozen=True)
-
-        job_id: str
-        status: JobStatus
-        input_hash: str
-        blockchain_identifier: str
-        created_at: datetime
-        updated_at: datetime
-        result: Optional[str] = None
-        error: Optional[str] = None
-    ```
-
-    **3. Legal transitions map:**
-    ```python
-    LEGAL_TRANSITIONS: dict[JobStatus, list[JobStatus]] = {
-        JobStatus.AWAITING_PAYMENT: [JobStatus.RUNNING],
-        JobStatus.RUNNING:          [JobStatus.COMPLETED, JobStatus.FAILED],
-        JobStatus.COMPLETED:        [],
-        JobStatus.FAILED:           [],
-    }
-    ```
-
-    **4. Transition validator:**
-    ```python
-    def validate_transition(current: JobStatus, target: JobStatus) -> None:
-        if target not in LEGAL_TRANSITIONS[current]:
-            raise InvalidStateTransitionError(
-                from_state=current.value,
-                to_state=target.value,
+        def create(self, input_hash: str) -> Job:
+            job_id = str(uuid.uuid4())
+            now = datetime.now(timezone.utc)
+            job = Job(
+                job_id=job_id,
+                status=JobStatus.AWAITING_PAYMENT,
+                input_hash=input_hash,
+                blockchain_identifier="mock_bc_" + job_id[:8],
+                created_at=now,
+                updated_at=now,
             )
+            with self._lock:
+                self._store[job_id] = job
+            return job
+
+        def get(self, job_id: str) -> Job:
+            with self._lock:
+                job = self._store.get(job_id)
+            if job is None:
+                raise JobNotFoundError(job_id)
+            return job
+
+        def update_status(
+            self,
+            job_id: str,
+            target: JobStatus,
+            result: Optional[str] = None,
+            error: Optional[str] = None,
+        ) -> Job:
+            with self._lock:
+                job = self._store.get(job_id)
+                if job is None:
+                    raise JobNotFoundError(job_id)
+                validate_transition(job.status, target)
+                updated = job.model_copy(update={
+                    "status": target,
+                    "updated_at": datetime.now(timezone.utc),
+                    "result": result,
+                    "error": error,
+                })
+                self._store[job_id] = updated
+            return updated
+
+        def count(self) -> int:
+            with self._lock:
+                return len(self._store)
     ```
 
     AVOID:
-    - Do NOT import `fastapi`, `httpx`, or any I/O module.
-    - Do NOT use `model_config = ConfigDict(extra='allow')` — must be `'forbid'`.
-    - Do NOT set `frozen=False` — immutability is required.
-    - Do NOT use `model_validator` or `field_validator` here — pure structural definition only.
-    - The `validate_transition` function must pass `.value` strings to `InvalidStateTransitionError` (not the enum member), so `e.from_state == "completed"` works in tests.
+    - Do NOT mutate `job` directly — `Job` is frozen. Always use `model_copy(update={...})`.
+    - Do NOT release `_lock` between the `get` and `update` inside `update_status` — the entire read-validate-write sequence MUST be atomic under the same lock acquisition.
+    - Do NOT import `fastapi`, `httpx`, or any HTTP module.
+    - Do NOT call `validate_transition()` outside of `_lock` in `update_status`.
+    - `datetime.now(timezone.utc)` — always use timezone-aware datetimes (NOT `datetime.utcnow()`).
   </action>
-  <verify>python -c "from app.domain.models import Job, JobStatus, LEGAL_TRANSITIONS, validate_transition; print('OK')"</verify>
+  <verify>python -c "from app.repository.job_repo import InMemoryJobRepository; r = InMemoryJobRepository(); j = r.create('a'*64); print('repo OK', j.status)"</verify>
   <done>
-    - `app/domain/models.py` imports cleanly.
-    - `JobStatus` has exactly 4 members.
-    - `Job` model instantiates with all required fields.
-    - `Job` rejects extra fields (raises `ValidationError`).
-    - `Job` is frozen (mutation raises `ValidationError`).
-    - `LEGAL_TRANSITIONS` has 4 keys.
-    - `validate_transition(JobStatus.AWAITING_PAYMENT, JobStatus.RUNNING)` does NOT raise.
-    - `validate_transition(JobStatus.COMPLETED, JobStatus.RUNNING)` raises `InvalidStateTransitionError`.
+    - `app/repository/job_repo.py` imports cleanly.
+    - `InMemoryJobRepository().create('a'*64)` returns a `Job` with `status == JobStatus.AWAITING_PAYMENT`.
+    - `InMemoryJobRepository().get('nonexistent')` raises `JobNotFoundError`.
+    - No imports from `fastapi`, `httpx`, or any I/O module.
   </done>
 </task>
 
 ## Must-Haves
 
-After all tasks complete, verify:
-- [ ] `app/domain/__init__.py` exists (empty)
-- [ ] `app/domain/exceptions.py` — 3 exception classes, zero imports
-- [ ] `app/domain/models.py` — `JobStatus`, `Job`, `LEGAL_TRANSITIONS`, `validate_transition()`
-- [ ] Zero imports from `fastapi`, `httpx`, or any I/O module across all 3 files
+- [ ] `app/repository/__init__.py` exists (empty)
+- [ ] `app/repository/job_repo.py` — `InMemoryJobRepository` with `create`, `get`, `update_status`, `count`
+- [ ] `_lock` wraps every `_store` access (reads AND writes)
+- [ ] `Job` is never mutated — always `model_copy(update={...})`
+- [ ] `update_status` is fully atomic (get + validate + write under single lock)
 
 ## Success Criteria
 
-- [ ] `python -c "from app.domain.models import Job, JobStatus, LEGAL_TRANSITIONS, validate_transition"` exits 0
+- [ ] `python -c "from app.repository.job_repo import InMemoryJobRepository"` exits 0
 - [ ] All tasks verified passing
-- [ ] No regressions in tests
 
 ---
 ---
-phase: 1
+phase: 2
 plan: 2
+wave: 1
+gap_closure: false
+---
+
+# Plan 2.2: Service Layer
+
+## Objective
+
+Create the thin service wrapper layer — pure functions that delegate to the repository. Nothing stateful here. No HTTP. This layer is the calling convention used by routers in Phase 3+.
+
+## Context
+
+Load these files for context:
+- `.gsd/SPEC.md`
+- `app/domain/models.py`
+- `app/repository/job_repo.py`
+
+## Tasks
+
+<task type="auto">
+  <name>Create app/services/__init__.py (empty)</name>
+  <files>app/services/__init__.py</files>
+  <action>
+    Create `app/services/__init__.py` as a completely empty file.
+    No content, no imports, no comments.
+  </action>
+  <verify>python -c "import app.services; print('OK')"</verify>
+  <done>
+    - `app/services/__init__.py` exists and is empty.
+  </done>
+</task>
+
+<task type="auto">
+  <name>Create app/services/job_service.py</name>
+  <files>app/services/job_service.py</files>
+  <action>
+    Create `app/services/job_service.py` with exactly these two pure functions:
+
+    **Imports (ONLY these):**
+    ```python
+    from typing import Optional
+
+    from app.domain.models import Job, JobStatus
+    from app.repository.job_repo import InMemoryJobRepository
+    ```
+
+    **Functions:**
+    ```python
+    def create_job(repo: InMemoryJobRepository, input_hash: str) -> Job:
+        return repo.create(input_hash)
+
+
+    def advance_job_state(
+        repo: InMemoryJobRepository,
+        job_id: str,
+        target: JobStatus,
+        result: Optional[str] = None,
+        error: Optional[str] = None,
+    ) -> Job:
+        return repo.update_status(job_id, target, result=result, error=error)
+    ```
+
+    AVOID:
+    - Do NOT add any business logic here — pure pass-throughs to the repo.
+    - Do NOT import `fastapi`, `httpx`, or any HTTP module.
+    - Do NOT use `str | None` union syntax — use `Optional[str]`.
+  </action>
+  <verify>python -c "from app.services.job_service import create_job, advance_job_state; print('service OK')"</verify>
+  <done>
+    - `app/services/job_service.py` imports cleanly.
+    - `create_job` and `advance_job_state` are importable.
+  </done>
+</task>
+
+## Must-Haves
+
+- [ ] `app/services/__init__.py` exists (empty)
+- [ ] `app/services/job_service.py` — `create_job`, `advance_job_state` (pure functions, no state)
+- [ ] No business logic — delegates 100% to repo
+
+## Success Criteria
+
+- [ ] `python -c "from app.services.job_service import create_job, advance_job_state"` exits 0
+- [ ] All tasks verified passing
+
+---
+---
+phase: 2
+plan: 3
 wave: 2
 gap_closure: false
 ---
 
-# Plan 1.2: Phase 1 Test Suite
+# Plan 2.3: Phase 2 Test Suite
 
 ## Objective
 
-Write and pass the complete Pytest verification suite for Phase 1. Every test case defined in `PHASE_1.md` must pass. This plan runs AFTER Plan 1.1 is complete — the domain layer must already exist.
+Write and pass the complete Pytest verification suite for Phase 2. All 8 test cases must pass, including the thread-safety concurrent test. Runs AFTER Plans 2.1 and 2.2 are complete.
 
 ## Context
 
 Load these files for context:
-- `.gsd/SPEC.md`
-- `.gsd/PHASE_1.md` → "Verification Criteria" section
-- `app/domain/models.py` (created in Plan 1.1)
-- `app/domain/exceptions.py` (created in Plan 1.1)
+- `.gsd/PHASE_2.md` → "Verification Criteria" section
+- `app/repository/job_repo.py`
+- `app/services/job_service.py`
 
 ## Tasks
 
 <task type="auto">
-  <name>Create tests/test_phase1_models.py</name>
-  <files>tests/__init__.py, tests/test_phase1_models.py</files>
+  <name>Create tests/test_phase2_repository.py</name>
+  <files>tests/test_phase2_repository.py</files>
   <action>
-    1. Create `tests/__init__.py` as an empty file (if it doesn't exist).
-    2. Create `tests/test_phase1_models.py` with ALL 6 test cases below. Do NOT paraphrase — implement them exactly as specified:
+    Create `tests/test_phase2_repository.py` with ALL 8 test cases below exactly as specified:
 
     ```python
+    import threading
     import pytest
-    from datetime import datetime
-    from pydantic import ValidationError
 
-    from app.domain.models import Job, JobStatus, validate_transition
-    from app.domain.exceptions import InvalidStateTransitionError
-
-
-    # --- Helpers ---
-
-    def _make_valid_job(**overrides) -> Job:
-        """Factory for a valid Job instance."""
-        defaults = dict(
-            job_id="test-job-id-0001",
-            status=JobStatus.AWAITING_PAYMENT,
-            input_hash="a" * 64,
-            blockchain_identifier="mock_bc_test",
-            created_at=datetime.utcnow(),
-            updated_at=datetime.utcnow(),
-        )
-        defaults.update(overrides)
-        return Job(**defaults)
+    from app.domain.models import JobStatus
+    from app.domain.exceptions import JobNotFoundError, InvalidStateTransitionError
+    from app.repository.job_repo import InMemoryJobRepository
 
 
-    # TC-1.1: JobStatus has exactly 4 members
-    def test_job_status_members():
-        assert set(JobStatus) == {
-            JobStatus.AWAITING_PAYMENT,
-            JobStatus.RUNNING,
-            JobStatus.COMPLETED,
-            JobStatus.FAILED,
-        }
+    # TC-2.1: create() returns a job in AWAITING_PAYMENT state
+    def test_create_job_initial_state():
+        repo = InMemoryJobRepository()
+        job = repo.create(input_hash="a" * 64)
+        assert job.status == JobStatus.AWAITING_PAYMENT
+        assert job.input_hash == "a" * 64
+        assert job.blockchain_identifier.startswith("mock_bc_")
+        assert job.result is None
+        assert job.error is None
 
 
-    # TC-1.2: Job model rejects extra fields
-    def test_job_rejects_extra_fields():
-        with pytest.raises(ValidationError):
-            Job(
-                job_id="abc",
-                status=JobStatus.AWAITING_PAYMENT,
-                input_hash="x" * 64,
-                blockchain_identifier="mock_bc_abc",
-                created_at=datetime.utcnow(),
-                updated_at=datetime.utcnow(),
-                EXTRA_FIELD="should_fail",
-            )
+    # TC-2.2: get() returns the same job that was created
+    def test_get_returns_created_job():
+        repo = InMemoryJobRepository()
+        job = repo.create(input_hash="b" * 64)
+        retrieved = repo.get(job.job_id)
+        assert retrieved.job_id == job.job_id
 
 
-    # TC-1.3: Job model is frozen (immutable)
-    def test_job_is_frozen():
-        job = _make_valid_job()
-        with pytest.raises(ValidationError):
-            job.status = JobStatus.RUNNING
+    # TC-2.3: get() raises JobNotFoundError for unknown ID
+    def test_get_unknown_job_raises():
+        repo = InMemoryJobRepository()
+        with pytest.raises(JobNotFoundError):
+            repo.get("nonexistent-id")
 
 
-    # TC-1.4: Legal transitions do not raise
-    @pytest.mark.parametrize("from_s,to_s", [
-        (JobStatus.AWAITING_PAYMENT, JobStatus.RUNNING),
-        (JobStatus.RUNNING, JobStatus.COMPLETED),
-        (JobStatus.RUNNING, JobStatus.FAILED),
-    ])
-    def test_legal_transitions(from_s, to_s):
-        validate_transition(from_s, to_s)  # must NOT raise
+    # TC-2.4: Legal state transition updates status and updated_at
+    def test_legal_transition_updates_job():
+        repo = InMemoryJobRepository()
+        job = repo.create(input_hash="c" * 64)
+        updated = repo.update_status(job.job_id, JobStatus.RUNNING)
+        assert updated.status == JobStatus.RUNNING
+        assert updated.updated_at >= job.updated_at
 
 
-    # TC-1.5: Illegal transitions raise InvalidStateTransitionError
-    @pytest.mark.parametrize("from_s,to_s", [
-        (JobStatus.AWAITING_PAYMENT, JobStatus.COMPLETED),
-        (JobStatus.AWAITING_PAYMENT, JobStatus.FAILED),
-        (JobStatus.COMPLETED, JobStatus.RUNNING),
-        (JobStatus.FAILED, JobStatus.RUNNING),
-        (JobStatus.COMPLETED, JobStatus.AWAITING_PAYMENT),
-        (JobStatus.RUNNING, JobStatus.AWAITING_PAYMENT),
-    ])
-    def test_illegal_transitions(from_s, to_s):
+    # TC-2.5: Illegal state transition raises InvalidStateTransitionError
+    def test_illegal_transition_raises():
+        repo = InMemoryJobRepository()
+        job = repo.create(input_hash="d" * 64)
         with pytest.raises(InvalidStateTransitionError):
-            validate_transition(from_s, to_s)
+            repo.update_status(job.job_id, JobStatus.COMPLETED)  # skip RUNNING
 
 
-    # TC-1.6: InvalidStateTransitionError carries state info
-    def test_invalid_transition_error_attributes():
-        try:
-            validate_transition(JobStatus.COMPLETED, JobStatus.RUNNING)
-            pytest.fail("Expected InvalidStateTransitionError")
-        except InvalidStateTransitionError as e:
-            assert e.from_state == "completed"
-            assert e.to_state == "running"
+    # TC-2.6: count() reflects stored jobs
+    def test_count_reflects_stored_jobs():
+        repo = InMemoryJobRepository()
+        assert repo.count() == 0
+        repo.create("e" * 64)
+        repo.create("f" * 64)
+        assert repo.count() == 2
+
+
+    # TC-2.7: Thread-safety — concurrent creates produce unique IDs
+    def test_concurrent_creates_are_unique():
+        repo = InMemoryJobRepository()
+        ids = []
+        lock = threading.Lock()
+
+        def worker():
+            job = repo.create("g" * 64)
+            with lock:
+                ids.append(job.job_id)
+
+        threads = [threading.Thread(target=worker) for _ in range(100)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert len(ids) == 100
+        assert len(set(ids)) == 100  # all unique
+
+
+    # TC-2.8: completed job with result is stored correctly
+    def test_completed_job_stores_result():
+        repo = InMemoryJobRepository()
+        job = repo.create("h" * 64)
+        repo.update_status(job.job_id, JobStatus.RUNNING)
+        done = repo.update_status(
+            job.job_id, JobStatus.COMPLETED, result="output_data"
+        )
+        assert done.status == JobStatus.COMPLETED
+        assert done.result == "output_data"
+        assert done.error is None
     ```
 
     AVOID:
-    - Do NOT use `monkeypatch`, `mocker`, or any fixture that touches the filesystem or network.
-    - Do NOT alter the parametrize argument lists — TC-1.5 must cover ALL 6 illegal pairs.
-    - The `_make_valid_job` helper MUST default `input_hash` to exactly 64 characters.
+    - Each test creates its own fresh `InMemoryJobRepository()` — no shared state.
+    - TC-2.7 MUST spawn exactly 100 threads.
+    - Do NOT modify test file to fix failures — fix the implementation instead.
   </action>
-  <verify>pytest tests/test_phase1_models.py -v</verify>
+  <verify>pytest tests/test_phase2_repository.py -v</verify>
   <done>
-    - `pytest tests/test_phase1_models.py -v` outputs exactly:
-      - `test_job_status_members` PASSED
-      - `test_job_rejects_extra_fields` PASSED
-      - `test_job_is_frozen` PASSED
-      - `test_legal_transitions[...][3 parametrize cases]` ALL PASSED
-      - `test_illegal_transitions[...][6 parametrize cases]` ALL PASSED
-      - `test_invalid_transition_error_attributes` PASSED
-    - Final line: `6 passed` (parametrized cases counted as sub-items of 6 test functions)
-    - Exit code: 0
-    - Zero warnings about missing imports or unresolved references.
+    - `pytest tests/test_phase2_repository.py -v` → 8 passed, 0 failed, exit code 0.
+    - TC-2.7 passes reliably.
   </done>
 </task>
 
 <task type="auto">
-  <name>Install dependencies and run gate check</name>
-  <files>requirements.txt</files>
+  <name>Run combined Phase 1 + Phase 2 gate check</name>
+  <files>(no new files)</files>
   <action>
-    1. Check if `requirements.txt` exists. If not, create it with:
-    ```
-    fastapi>=0.110.0
-    pydantic>=2.0.0
-    httpx>=0.27.0
-    pytest>=8.0.0
-    pytest-asyncio>=0.23.0
-    uvicorn>=0.29.0
-    ```
-    2. Run: `pip install -r requirements.txt`
-    3. Run the gate: `pytest tests/test_phase1_models.py -v`
-    4. If any test fails — debug and fix `app/domain/models.py` or `app/domain/exceptions.py` (NOT the test file) until all 6 pass.
+    Run: `pytest tests/ -v --tb=short`
 
-    AVOID:
-    - Do NOT edit the test file to make tests pass — fix the implementation.
-    - Do NOT downgrade pydantic below v2.
-    - Do NOT add `pytest-mock` or `anyio` unless a clear import error requires it.
+    If Phase 2 tests fail, fix `app/repository/job_repo.py` or `app/services/job_service.py`:
+    - TC-2.4 failure → `updated_at` not refreshed: ensure `model_copy` sets `"updated_at": datetime.now(timezone.utc)`
+    - TC-2.5 failure → transition not guarded: ensure `validate_transition()` is inside `update_status`
+    - TC-2.7 failure (duplicate IDs) → lock scope too narrow: ensure `_store[job_id] = job` is inside `with self._lock`
+    - TC-2.8 failure → result not persisted: ensure `model_copy(update={..., "result": result})`
+
+    AVOID: Do NOT modify test files. Fix implementation only.
   </action>
-  <verify>pytest tests/test_phase1_models.py -v --tb=short 2>&1 | tail -5</verify>
+  <verify>pytest tests/ -v --tb=short 2>&1 | tail -3</verify>
   <done>
-    - `pytest tests/test_phase1_models.py` → 6 passed, 0 failed, exit code 0.
-    - No imports from `fastapi`, `httpx`, or any I/O module exist in `app/domain/`.
+    - `pytest tests/` → **21 passed, 0 failed** (Phase 1: 13 + Phase 2: 8)
+    - Exit code: 0
   </done>
 </task>
 
 ## Must-Haves
 
-After all tasks complete, verify:
-- [ ] `tests/__init__.py` exists (empty)
-- [ ] `tests/test_phase1_models.py` contains all 6 test functions with exact parametrize pairs
-- [ ] `requirements.txt` exists with pinned major versions
+- [ ] `tests/test_phase2_repository.py` — all 8 test functions, each with fresh repo
+- [ ] TC-2.7 spawns exactly 100 threads
 
 ## Success Criteria
 
-- [ ] `pytest tests/test_phase1_models.py -v` → **6 passed, 0 failed**
+- [ ] `pytest tests/test_phase2_repository.py -v` → **8 passed, 0 failed**
+- [ ] `pytest tests/` → **21 passed, 0 failed**
 - [ ] Exit code: `0`
-- [ ] All tasks verified passing
-- [ ] No regressions in tests
