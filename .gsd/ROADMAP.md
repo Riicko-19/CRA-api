@@ -7,7 +7,7 @@
 | 1 | Domain Models & State Machine | ✅ COMPLETE | Pure domain layer: Pydantic v2 models, JobStatus enum, LEGAL_TRANSITIONS, validate_transition(), custom exceptions. No I/O, no HTTP. |
 | 2 | In-Memory Repository | ✅ COMPLETE | Thread-safe InMemoryJobRepository with create/get/update_status. Job service layer. No HTTP. |
 | 3 | Core Endpoints & Hashing | ✅ COMPLETE | FastAPI app factory, SHA-256 hash_inputs(), /availability, /input_schema, /start_job. Dependency injection via app.state. |
-| 4 | Status, Input & Error Handling | ⬜ PENDING | /status, /provide_input, mock Ed25519 verify_signature(), global exception handlers for all domain errors. |
+| 4 | Status, Input & Error Handling | ✅ COMPLETE | /status, /provide_input, mock Ed25519 verify_signature(), global exception handlers for all domain errors. |
 
 ## Phase Detail
 
