@@ -1,11 +1,15 @@
 import threading
 import uuid
+import logging
 from datetime import datetime, timezone
 from typing import Optional
 
 from app.domain.models import Job, JobStatus, validate_transition
 from app.domain.exceptions import JobNotFoundError
 from app.ports.job_repository_port import JobRepositoryPort
+
+
+logger = logging.getLogger(__name__)
 
 
 class InMemoryJobRepository(JobRepositoryPort):
@@ -59,6 +63,7 @@ class InMemoryJobRepository(JobRepositoryPort):
             if job is None:
                 raise JobNotFoundError(job_id)
             validate_transition(job.status, target)
+            previous = job.status
             updated = job.model_copy(update={
                 "status": target,
                 "updated_at": datetime.now(timezone.utc),
@@ -66,6 +71,14 @@ class InMemoryJobRepository(JobRepositoryPort):
                 "error": error,
             })
             self._store[job_id] = updated
+        logger.info(
+            "Job state transition",
+            extra={
+                "job_id": job_id,
+                "from_state": previous.value,
+                "to_state": target.value,
+            },
+        )
         return updated
 
     def count(self) -> int:

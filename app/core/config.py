@@ -14,6 +14,12 @@ class Settings(BaseSettings):
     masumi_network: str = "Preprod"
     qdrant_url: str = ":memory:"
     qdrant_api_key: str | None = None
+    api_key: str = "test-api-key"
+    job_timeout_minutes: int = 30
+    orchestrator_url: str = "mock://orchestrator"
+    openrouter_api_key: str = ""
+    openrouter_url: str = "https://openrouter.ai/api/v1/chat/completions"
+    allowed_origins: str = "*"
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 

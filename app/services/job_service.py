@@ -31,3 +31,7 @@ def advance_job_state(
     error: Optional[str] = None,
 ) -> Job:
     return repo.update_status(job_id, target, result=result, error=error)
+
+
+async def verify_payment(payment_port: PaymentPort, blockchain_identifier: str) -> bool:
+    return await payment_port.verify_payment_status(blockchain_identifier)

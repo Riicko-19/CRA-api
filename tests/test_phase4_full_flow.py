@@ -2,6 +2,7 @@ import pytest
 import httpx
 
 from app.main import create_app
+from app.core.config import settings
 from app.services.agent_runner import execute_agent_task
 
 
@@ -18,8 +19,20 @@ def client(app):
     )
 
 
+def _headers() -> dict[str, str]:
+    return {"X-API-Key": settings.api_key}
+
+
+def _start_payload() -> dict:
+    return {
+        "target_domain": "https://example.com",
+        "my_product_usp": "Fast onboarding with built-in automation",
+        "ideal_customer_profile": "SMB teams needing simple growth workflows",
+    }
+
+
 async def _create_job(c: httpx.AsyncClient) -> dict:
-    r = await c.post("/start_job", json={"inputs": {"task": "test_task"}})
+    r = await c.post("/start_job", json=_start_payload(), headers=_headers())
     assert r.status_code == 201
     return r.json()
 
@@ -29,7 +42,7 @@ async def _create_job(c: httpx.AsyncClient) -> dict:
 async def test_get_status_returns_job(client):
     async with client as c:
         job = await _create_job(c)
-        r = await c.get(f"/status/{job['job_id']}")
+        r = await c.get(f"/status/{job['job_id']}", headers=_headers())
     assert r.status_code == 200
     assert r.json()["job_id"] == job["job_id"]
 
@@ -38,7 +51,7 @@ async def test_get_status_returns_job(client):
 @pytest.mark.asyncio
 async def test_get_status_unknown_job(client):
     async with client as c:
-        r = await c.get("/status/nonexistent-000")
+        r = await c.get("/status/nonexistent-000", headers=_headers())
     assert r.status_code == 404
     assert "not found" in r.json()["detail"].lower()
 
@@ -55,7 +68,7 @@ async def test_provide_input_valid_signature(client, app):
             "job_id": job_id,
             "signature": f"valid_sig_{job_id}",
             "data": {"confirmation": "payment_received"},
-        })
+        }, headers=_headers())
     # Endpoint returns RUNNING state immediately
     assert r.status_code == 200
     assert r.json()["status"] == "running"
@@ -76,7 +89,7 @@ async def test_provide_input_invalid_signature(client):
             "job_id": job["job_id"],
             "signature": "wrong_signature",
             "data": {},
-        })
+        }, headers=_headers())
     assert r.status_code == 403
 
 
@@ -88,7 +101,7 @@ async def test_provide_input_unknown_job(client):
             "job_id": "ghost-job-id",
             "signature": "valid_sig_ghost-job-id",
             "data": {},
-        })
+        }, headers=_headers())
     assert r.status_code == 404
 
 
@@ -102,7 +115,7 @@ async def test_provide_input_rejects_extra_fields(client):
             "signature": f"valid_sig_{job['job_id']}",
             "data": {},
             "evil_extra": "hacked",
-        })
+        }, headers=_headers())
     assert r.status_code == 422
 
 
@@ -110,7 +123,7 @@ async def test_provide_input_rejects_extra_fields(client):
 @pytest.mark.asyncio
 async def test_422_response_shape(client):
     async with client as c:
-        r = await c.post("/start_job", json={"bad_field": "no_inputs"})
+        r = await c.post("/start_job", json={"bad_field": "no_inputs"}, headers=_headers())
     assert r.status_code == 422
     body = r.json()
     assert "detail" in body
@@ -129,7 +142,7 @@ async def test_full_job_lifecycle(client, app):
             "job_id": job_id,
             "signature": f"valid_sig_{job_id}",
             "data": {"confirm": True},
-        })
+        }, headers=_headers())
         # Immediate HTTP response is RUNNING
         assert r.json()["status"] == "running"
 
@@ -143,7 +156,23 @@ async def test_full_job_lifecycle(client, app):
 async def test_start_job_rate_limit(client):
     async with client as c:
         for _ in range(5):
-            r = await c.post("/start_job", json={"inputs": {"task": "t"}})
+            r = await c.post("/start_job", json=_start_payload(), headers=_headers())
             assert r.status_code == 201
-        r = await c.post("/start_job", json={"inputs": {"task": "t"}})
+        r = await c.post("/start_job", json=_start_payload(), headers=_headers())
     assert r.status_code == 429
+
+
+@pytest.mark.asyncio
+async def test_provide_input_requires_payment_confirmation(client, app, monkeypatch):
+    async def _unpaid(_: str) -> bool:
+        return False
+
+    monkeypatch.setattr(app.state.payment, "verify_payment_status", _unpaid)
+    async with client as c:
+        job = await _create_job(c)
+        r = await c.post("/provide_input", json={
+            "job_id": job["job_id"],
+            "signature": f"valid_sig_{job['job_id']}",
+            "data": {},
+        }, headers=_headers())
+    assert r.status_code == 402

@@ -5,6 +5,7 @@ import httpx
 from app.domain.models import JobStatus, validate_transition
 from app.domain.exceptions import InvalidStateTransitionError
 from app.main import create_app
+from app.core.config import settings
 
 
 @pytest.fixture
@@ -16,8 +17,20 @@ def client():
     )
 
 
+def _headers() -> dict[str, str]:
+    return {"X-API-Key": settings.api_key}
+
+
+def _start_payload() -> dict:
+    return {
+        "target_domain": "https://example.com",
+        "my_product_usp": "Fast onboarding with built-in automation",
+        "ideal_customer_profile": "SMB teams needing simple growth workflows",
+    }
+
+
 async def _create_job(c: httpx.AsyncClient) -> dict:
-    r = await c.post("/start_job", json={"inputs": {"task": "mip003_test"}})
+    r = await c.post("/start_job", json=_start_payload(), headers=_headers())
     assert r.status_code == 201
     return r.json()
 
