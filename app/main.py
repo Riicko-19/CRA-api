@@ -5,6 +5,7 @@ from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedR
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
+from app.adapters.masumi_payment import MasumiPaymentAdapter
 from app.core.config import limiter
 from app.domain.exceptions import (
     InvalidSignatureError,
@@ -18,16 +19,15 @@ from app.routers import jobs
 def create_app() -> FastAPI:
     app = FastAPI(title="Masumi MIP-003 Gateway", version="1.0.0")
 
-    # --- Rate limiting (no SlowAPIMiddleware — uses decorator-only mode) ---
-    # SlowAPIMiddleware uses BaseHTTPMiddleware which conflicts with custom
-    # exception handlers that also write responses (known Starlette issue).
-    # The @limiter.limit() decorator + this handler is sufficient.
+    # --- Rate limiting ---
     app.state.limiter = limiter
     app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
     # --- App state & routes ---
     repo = InMemoryJobRepository()
+    payment = MasumiPaymentAdapter()
     app.state.repo = repo
+    app.state.payment = payment
     app.include_router(jobs.router)
 
     # --- Exception handlers ---

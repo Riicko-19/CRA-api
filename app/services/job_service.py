@@ -1,27 +1,18 @@
 from __future__ import annotations
 
-import uuid
 from typing import Optional
 
-from masumi import Payment
-
-from app.core.config import settings, masumi_config
 from app.domain.models import Job, JobStatus
-from app.repository.job_repo import InMemoryJobRepository
+from app.ports.job_repository_port import JobRepositoryPort
+from app.ports.payment_port import PaymentPort
 
 
-async def create_job(repo: InMemoryJobRepository, input_hash: str) -> Job:
-    """Call the masumi Payment SDK to register a real on-chain payment request."""
-    payment = Payment(
-        agent_identifier=settings.agent_identifier,
-        config=masumi_config,
-        network=settings.masumi_network,
-        identifier_from_purchaser=uuid.uuid4().hex[:26],  # 26-char buyer hex placeholder
-        input_data={"input_hash": input_hash},
-    )
-    result = await payment.create_payment_request()
-    data = result["data"]
-
+async def create_job(
+    repo: JobRepositoryPort,
+    payment_port: PaymentPort,
+    input_hash: str,
+) -> Job:
+    data = await payment_port.create_payment_request(input_hash)
     return repo.create(
         input_hash=input_hash,
         blockchain_identifier=data["blockchainIdentifier"],
@@ -33,7 +24,7 @@ async def create_job(repo: InMemoryJobRepository, input_hash: str) -> Job:
 
 
 def advance_job_state(
-    repo: InMemoryJobRepository,
+    repo: JobRepositoryPort,
     job_id: str,
     target: JobStatus,
     result: Optional[str] = None,

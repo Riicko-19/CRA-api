@@ -5,9 +5,10 @@ from typing import Optional
 
 from app.domain.models import Job, JobStatus, validate_transition
 from app.domain.exceptions import JobNotFoundError
+from app.ports.job_repository_port import JobRepositoryPort
 
 
-class InMemoryJobRepository:
+class InMemoryJobRepository(JobRepositoryPort):
     def __init__(self):
         self._store: dict[str, Job] = {}
         self._lock = threading.Lock()
